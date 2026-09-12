@@ -90,7 +90,7 @@ class ZmxTests(unittest.TestCase):
         self.assertEqual(argv[:3], ["/bin/zmx", "attach", "--labels"])
         self.assertEqual(argv[-4:], ["cx-chat-test", "/bin/codex", "resume", ID])
         labels = zmx.parse_labels(argv[3])
-        self.assertEqual(labels["cx_version"], "0.7.0")
+        self.assertEqual(labels["cx_version"], "0.8.1")
         self.assertEqual(labels["cx_zmx_version"], "0.8.1")
         self.assertEqual(zmx.decode_path(labels["cx_launch_cwd"]), os.path.realpath(cwd))
         self.assertEqual(run.call_args.kwargs["env"]["ZMX_NO_DETACH_KEY"], "1")
@@ -172,6 +172,58 @@ class ZmxTests(unittest.TestCase):
             result = zmx.snapshot(bind_threads=False)
         self.assertEqual(result["sessions"][0]["state"], "NO_CODEX")
         self.assertEqual(result["sessions"][0]["codex_pids"], [])
+
+    def test_snapshot_reuses_supplied_process_table(self):
+        parsed = zmx.parse_ps(
+            " 10 1 0.0 1024 02:00 Ss ?? /bin/zsh\n"
+            " 12 10 2.5 4096 01:58 S ttys001 /opt/vendor/codex\n")
+        row = zmx.parse_list(listed(pid=10), "/tmp/zmx", socket.gethostname())[0]
+        with patch.object(zmx, "preflight", return_value=info()), \
+             patch.object(zmx, "list_sessions", return_value=[row]), \
+             patch.object(zmx, "processes") as inspect, \
+             patch.object(zmx, "gpu_state", return_value={"jobs": []}):
+            result = zmx.snapshot(bind_threads=False, process_table=parsed)
+        inspect.assert_not_called()
+        self.assertEqual(result['sessions'][0]['codex_pids'], [12])
+
+    def test_inventory_snapshot_skips_git_and_gpu_diagnostics(self):
+        parsed = zmx.parse_ps(
+            " 10 1 0.0 1024 02:00 Ss ?? /bin/zsh\n"
+            " 12 10 2.5 4096 01:58 S ttys001 /opt/vendor/codex\n")
+        row = zmx.parse_list(listed(pid=10), "/tmp/zmx", socket.gethostname())[0]
+        with patch.object(zmx, "preflight", return_value=info()), \
+             patch.object(zmx, "list_sessions", return_value=[row]), \
+             patch.object(zmx, "git_state") as git, \
+             patch.object(zmx, "gpu_state") as gpu:
+            result = zmx.snapshot(bind_threads=False, process_table=parsed,
+                                  include_diagnostics=False)
+        git.assert_not_called()
+        gpu.assert_not_called()
+        self.assertEqual(result['gpu']['status'], 'not-collected')
+
+    def test_client_map_checks_each_client_once_for_all_generations(self):
+        one = zmx.parse_list(listed(name='cx-agent-one', pid=10, created=1),
+                             '/tmp/zmx', socket.gethostname())[0]
+        two = zmx.parse_list(listed(name='cx-agent-two', pid=20, created=2),
+                             '/tmp/zmx', socket.gethostname())[0]
+        procs = {
+            31: {'pid': 31, 'executable': '/bin/zmx', 'tty': 'ttys031'},
+            32: {'pid': 32, 'executable': '/bin/zmx', 'tty': 'ttys032'},
+        }
+        outputs = [f"zmx attach CX_ZMX_GENERATION={zmx.generation_token(one)}",
+                   f"zmx attach CX_ZMX_GENERATION={zmx.generation_token(two)}"]
+        with patch.object(zmx.sys, 'platform', 'darwin'), \
+             patch.object(zmx, 'run', side_effect=outputs) as inspect:
+            result = zmx.client_tty_map([one, two], procs)
+        self.assertEqual(result, {one['sid']: {'/dev/ttys031'},
+                                  two['sid']: {'/dev/ttys032'}})
+        self.assertEqual(inspect.call_count, 2)
+
+    def test_supplied_empty_process_table_is_not_reinspected(self):
+        row = zmx.parse_list(listed(), '/tmp/zmx', socket.gethostname())[0]
+        with patch.object(zmx, 'processes') as inspect:
+            self.assertEqual(zmx.client_tty_map([row], {}), {row['sid']: set()})
+        inspect.assert_not_called()
 
     def test_provider_has_no_orchestration_command_literals(self):
         source = Path(zmx.__file__).read_text()

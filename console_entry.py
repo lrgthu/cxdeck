@@ -18,10 +18,13 @@ HELP = f'''CX Deck {VERSION} — persistent Codex sessions with a native termina
   cx dashboard               interactive workbench (n/new, Enter/focus, r/rename)
   cxl / cx status --json      one snapshot / structured diagnostics
   cx focus NAME              focus a verified existing pane, or open one
+  cx focus --next|--previous navigate verified views without opening clients
+  cx find QUERY              search local names/groups/cwd/UUID metadata
   cx rename NAME DISPLAY     update the native pane name; runtime identity unchanged
   cx pin NAME / cx unpin NAME  organize the workbench
   cx workspace save daily    save current sessions; --select NAME ... for a subset
-  cx workspace open daily    review/select saved workspace members
+  cx workspace capture daily save verified exact native iTerm topology (read-only)
+  cx workspace open daily    exact restore when captured; adaptive for legacy workspaces
   cx workspace open daily --all   deliberately open all; refuse incomplete groups
   cx workspace list          list saved collections
   cx group create/list/...   organize exact conversations in local groups
@@ -36,7 +39,8 @@ HELP = f'''CX Deck {VERSION} — persistent Codex sessions with a native termina
   cx project PATH            optional repository metadata after discovery
   cx doctor / cxinfo NAME     diagnostics / session details
   cxkill NAME                 explicit confirmed termination; never automatic
-  cx views rebuild           batch missing verified zmx views into native iTerm
+  cx views status            read-only runtime/presentation health
+  cx views rebuild [--workspace NAME]  create missing verified views only
   cx views refresh           refresh names on verified existing iTerm views
   cx config timestamps on|off  native iTerm scrollback timestamps (default on)
   cx upgrade status          runtime compatibility for the installed cx version
@@ -62,8 +66,12 @@ class ResumeBackend:
     def __getattr__(self, key):
         return getattr(self.core, key)
 
-    def raw_snapshot(self, *, bind_threads=True):
-        return self.core.snapshot(bind_threads=bind_threads)
+    def raw_snapshot(self, *, bind_threads=True, process_table=..., include_diagnostics=True):
+        if process_table is ...:
+            return self.core.snapshot(bind_threads=bind_threads,
+                                      include_diagnostics=include_diagnostics)
+        return self.core.snapshot(bind_threads=bind_threads, process_table=process_table,
+                                  include_diagnostics=include_diagnostics)
 
     def snapshot(self):
         import workbench
@@ -92,7 +100,7 @@ def main(argv=None, console=None):
         # The terminal-only path remains the original, independently tested API.
         # GUI operations use the workbench's verified existing-view reuse.
         b = ResumeBackend(console)
-        if args.no_iterm or args.list or args.json:
+        if args.no_iterm and not (args.list or args.json):
             codex_resume.execute(args, b)
         else:
             import workbench
@@ -116,19 +124,31 @@ def main(argv=None, console=None):
     if cmd in ('focus', 'rename', 'pin', 'unpin', 'info'):
         import workbench
         p = argparse.ArgumentParser(prog='cx ' + cmd)
-        p.add_argument('name')
+        if cmd == 'focus':
+            choice = p.add_mutually_exclusive_group(required=True)
+            choice.add_argument('name', nargs='?')
+            choice.add_argument('--next', action='store_true')
+            choice.add_argument('--previous', action='store_true')
+        else:
+            p.add_argument('name')
         if cmd == 'rename':
             p.add_argument('display')
         a = p.parse_args(rest)
         b = ResumeBackend(console)
         if cmd == 'focus':
-            workbench.focus_rows([workbench.resolve(a.name, b)], b)
+            if a.next or a.previous:
+                workbench.focus_navigation('next' if a.next else 'previous', b)
+            else:
+                workbench.focus_rows([workbench.resolve(a.name, b, bind_threads=False)], b)
         elif cmd == 'info':
-            print(json.dumps(workbench.resolve(a.name, b), indent=2))
+            print(json.dumps(workbench.resolve(a.name, b, bind_threads=False), indent=2))
         else:
             workbench.annotate(a.name, b, title=a.display if cmd == 'rename' else None,
                                pinned=(cmd == 'pin') if cmd != 'rename' else None)
         return 0
+    if cmd == 'find':
+        import workbench
+        return workbench.find_command(rest, ResumeBackend(console))
     if cmd == 'workspace':
         import workbench
         workbench.workspace_command(rest, ResumeBackend(console))

@@ -11,11 +11,11 @@ import cx_upgrade as upgrade
 
 
 class Backend:
-    VERSION = "0.7.0"
+    VERSION = "0.8.0"
     MIN_VERSION = (0, 8, 1)
     Error = RuntimeError
 
-    def __init__(self, versions=("0.7.0",), error=None):
+    def __init__(self, versions=("0.8.0",), error=None):
         self.versions = versions
         self.error = error
         self.calls = []
@@ -64,11 +64,13 @@ class UpgradeTests(unittest.TestCase):
                              "INCOMPATIBLE")
 
     def test_same_version_is_current(self):
-        self.assertEqual(upgrade.runtime_compatibility("0.7.0", "0.7.0"), "CURRENT")
+        self.assertEqual(upgrade.runtime_compatibility("0.8.0", "0.8.0"), "CURRENT")
 
     def test_older_compatible_runtime_has_upgrade_available(self):
-        self.assertEqual(upgrade.runtime_compatibility("0.6.0", "0.7.0"),
-                         "UPGRADE_AVAILABLE")
+        for launched in ("0.6.0", "0.7.0"):
+            with self.subTest(launched=launched):
+                self.assertEqual(upgrade.runtime_compatibility(launched, "0.8.0"),
+                                 "UPGRADE_AVAILABLE")
 
     def test_explicit_runtime_boundary_requires_upgrade(self):
         rules = (("0.8.0", "0.7.0"),)
@@ -84,19 +86,20 @@ class UpgradeTests(unittest.TestCase):
                 self.assertEqual(upgrade.runtime_compatibility(session, installed),
                                  "INCOMPATIBLE")
 
-    def test_real_style_v060_labels_remain_compatible(self):
-        data = upgrade.status_data(Backend(("0.6.0",)))
+    def test_v060_and_v070_labels_remain_compatible_without_regeneration(self):
+        data = upgrade.status_data(Backend(("0.6.0", "0.7.0")))
         self.assertEqual(data["status"], "AVAILABLE")
-        self.assertEqual(data["counts"], {"CURRENT": 0, "UPGRADE_AVAILABLE": 1,
+        self.assertEqual(data["counts"], {"CURRENT": 0, "UPGRADE_AVAILABLE": 2,
                          "UPGRADE_REQUIRED": 0, "INCOMPATIBLE": 0})
-        self.assertEqual(data["sessions"][0]["upgrade_state"], "UPGRADE_AVAILABLE")
+        self.assertTrue(all(row["upgrade_state"] == "UPGRADE_AVAILABLE"
+                            for row in data["sessions"]))
 
     def test_upgrade_status_json_is_stable_and_read_only(self):
         backend = Backend(("0.6.0", "0.6.0"))
         with contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(upgrade.main(["status", "--json"], backend), 0)
         data = json.loads(output.getvalue())
-        self.assertEqual(data["installed_cx_version"], "0.7.0")
+        self.assertEqual(data["installed_cx_version"], "0.8.0")
         self.assertEqual(data["zmx"], {"installed_version": "0.8.1",
                          "minimum_version": "0.8.1", "compatible": True,
                          "error": None})

@@ -182,7 +182,7 @@ def _prepare_current_view(display_name):
 def _attach_or_focus(row, display_name, b=None):
     """Use the caller pane only when no client exists; otherwise focus one verified view."""
     b = b or backend()
-    data = b.snapshot()
+    data = b.snapshot(bind_threads=False)
     expected = b.normalize_generation(row)
     matches = [item for item in data['sessions']
                if b.normalize_generation(item) == expected]
@@ -201,7 +201,7 @@ def _attach_or_focus(row, display_name, b=None):
     import console_entry
     import workbench
     adapter = console_entry.ResumeBackend(sys.modules[__name__])
-    target = workbench.resolve(current['session'], adapter)
+    target = workbench.resolve(current['session'], adapter, bind_threads=False)
     workbench.focus_rows([target], adapter)
 
 
@@ -384,7 +384,12 @@ HELP = f"""CX Deck {VERSION}: persistent Codex sessions with a native terminal e
   cx new --split|--tab|--window  open native iTerm2 views
   cx resume                  saved/live picker; cold resume defaults to YOLO
   cx status --json           normalized zmx status
-  cx views rebuild|refresh   create missing views or refresh presentation only
+  cx workspace capture NAME read-only exact native iTerm topology capture
+  cx workspace open NAME    exact restore when captured; adaptive otherwise
+  cx views status            separate conversation/runtime/view health
+  cx views rebuild|refresh [--workspace NAME]  scoped presentation repair
+  cx find QUERY              metadata-only conversation search
+  cx focus --next|--previous navigate verified existing views
   cx config timestamps on|off  native iTerm scrollback timestamps
   cx upgrade [status]        report code/runtime compatibility; never restart implicitly
   cx doctor                  zmx/Codex/iTerm/upgrade diagnostics

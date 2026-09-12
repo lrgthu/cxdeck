@@ -246,9 +246,10 @@ def inventory(history, home, cx):
                 home=home, managed=s, state=s["state"], external_pids=[])
     for pid in data["outside_managed_codex_pids"] or []:
         for tid in opened.get(pid, set()):
-            if tid in rows:
-                rows[tid]["external_pids"].append(pid)
-                rows[tid]["state"] = "LIVE-OUTSIDE"
+            r = rows.setdefault(tid, dict(key=tid, thread_id=tid, title=tid, cwd=None,
+                updated=0, home=home, managed=None, state="LIVE-OUTSIDE", external_pids=[]))
+            r["external_pids"].append(pid)
+            r["state"] = "LIVE-OUTSIDE"
         if opened.get(pid):
             mapped.add(pid)
     unknown = sorted(set(all_pids)-mapped)

@@ -35,7 +35,12 @@ APPLESCRIPT = r'''on run argv
                     set ss to get sessions of t
                     repeat with si from 1 to count of ss
                         set s to item si of ss
-                        set output to output & (unique id of s) & (ASCII character 9) & (tty of s) & linefeed
+                        -- After supported Python-API moves, iTerm can briefly
+                        -- expose these properties as object specifiers. Force a
+                        -- fresh scalar read before building the response.
+                        set sessionGuid to (get unique id of s) as text
+                        set sessionTTY to (get tty of s) as text
+                        set output to output & sessionGuid & (ASCII character 9) & sessionTTY & linefeed
                     end repeat
                 end repeat
             end repeat
@@ -491,8 +496,29 @@ class ITerm:
         return result
 
 
-def client_map(b):
-    rows = b.snapshot()['sessions']
+def _presentation_snapshot(b):
+    """Read one nonbinding runtime snapshot for a presentation operation."""
+    raw_reader = getattr(type(b), 'raw_snapshot', None)
+    batch_reader = getattr(b, 'client_tty_map', None)
+    if callable(raw_reader) and callable(batch_reader):
+        procs = b.processes()
+        data = b.raw_snapshot(bind_threads=False, process_table=procs,
+                              include_diagnostics=False)
+        context = data.get('context') or {}
+        for row in data.get('sessions', []):
+            row['_key'] = live_key(row, context)
+        return data, procs
+    return b.snapshot(), None
+
+
+def client_map(b, data=None, procs=None):
+    """Verify all attach clients without binding or relabeling a generation."""
+    if data is None:
+        data, procs = _presentation_snapshot(b)
+    rows = data['sessions']
+    batch_reader = getattr(b, 'client_tty_map', None)
+    if procs is not None and callable(batch_reader):
+        return batch_reader(rows, procs)
     return {row['sid']: b.client_ttys(row) for row in rows}
 
 
@@ -520,14 +546,14 @@ def show(rows, b, store, gui=None, mode='window', anchor=None,
         configure(store.preference('timestamps', True))
     gui.preflight(mode, anchor)
     with store.lock('views'):
-        data = b.snapshot()
+        data, procs = _presentation_snapshot(b)
         context = data['context']
         current = {r['_key']: r for r in data['sessions']}
         selected = {r['_key']: r for r in rows}
         requested = list(selected)
         if any(k not in current for k in requested):
             raise StateError('A selected session changed/disappeared; nothing opened. Refresh the console.')
-        views, clients = gui.inventory(), client_map(b)
+        views, clients = gui.inventory(), client_map(b, data, procs)
         state = store.read()
         existing, missing = [], []
         for key in requested:
@@ -553,7 +579,9 @@ def show(rows, b, store, gui=None, mode='window', anchor=None,
             receipts = gui.open([attachment(r, context) for r, _ in missing], mode, anchor,
                                 per_tab, min_columns, min_rows,
                                 names=[display for _, display in missing])
-            store.change(lambda s: s['views'].update({r['_key']: v for (r, _), v in zip(missing, receipts)}))
+            if len(receipts) != len(missing):
+                raise StateError('iTerm2 returned an incomplete view receipt set. Inspect the new panes; '
+                                 'no preferred-view metadata was recorded and agent processes were retained.')
             deadline = time.monotonic() + 5
             while True:
                 connected = client_map(b)
@@ -564,6 +592,7 @@ def show(rows, b, store, gui=None, mode='window', anchor=None,
                 if time.monotonic() >= deadline:
                     raise StateError('Views created but attachment unconfirmed. Inspect them; agent processes were retained.')
                 time.sleep(0.05)
+            store.set_view_receipts({r['_key']: v for (r, _), v in zip(missing, receipts)})
         elif existing:
             gui.focus(existing[0])
         return dict(opened=len(missing), reused=len(existing))
@@ -576,13 +605,13 @@ def refresh(rows, b, store, gui=None):
     if configure:
         configure(store.preference('timestamps', True))
     gui.preflight()
-    data = b.snapshot()
+    data, procs = _presentation_snapshot(b)
     current = {r['_key']: r for r in data['sessions']}
     selected = {r['_key']: r for r in rows}
     requested = list(selected)
     if any(key not in current for key in requested):
         raise StateError('A selected session changed/disappeared; no presentation was changed.')
-    views, clients = gui.inventory(), client_map(b)
+    views, clients = gui.inventory(), client_map(b, data, procs)
     refreshed, missing = 0, 0
     for key in requested:
         row = current[key]

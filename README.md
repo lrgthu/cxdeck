@@ -33,7 +33,7 @@ with `cx`.
 
 ## Install
 
-The fully tested v0.7 environment is macOS with iTerm2, Python 3.9 or newer,
+The fully tested v0.8 environment is macOS with iTerm2, Python 3.9 or newer,
 zsh, Git, the Codex CLI, and zmx 0.8.1 or newer. Headless zmx sessions work
 without iTerm2, but native layouts, names, and timestamps require iTerm2.
 
@@ -90,8 +90,11 @@ cx focus EXACT_NAME
 cx rename EXACT_NAME DISPLAY_NAME
 cx pin|unpin EXACT_NAME
 cx group ...
-cx workspace ...
-cx views rebuild|refresh
+cx workspace save|capture|open|list ...
+cx views status [--json] [--workspace NAME]
+cx views rebuild|refresh [--workspace NAME]
+cx find QUERY
+cx focus --next|--previous
 cx config timestamps on|off
 cx dashboard
 cx status [--json]
@@ -128,6 +131,23 @@ Display names, pins, groups, workspace membership, and layout metadata live in
 `~/.local/state/cxdeck`. They organize exact conversations without changing
 their UUID or runtime generation. A workspace records a provider-neutral native
 layout plan and reconstructs verified views without nesting another terminal UI.
+`cx workspace capture NAME [--replace]` can add an optional exact native split
+tree after double-read verification. This read-only feature lazily requires the
+explicitly installed `iterm2==2.23` Python package; membership-only workspaces
+remain valid. Install that optional support into the same Python used by `cx`
+with `python3 -m pip install --user 'iterm2==2.23'`. Opening a captured workspace resolves every exact UUID and checks
+duplicates before moving verified iTerm Sessions into the saved tree. Frames and
+ratios are best-effort hints. Use `cx workspace open NAME --adaptive` to
+deliberately use the older adaptive layout; exact restore never falls back to it
+silently.
+
+`cx status`, `cx resume --json`, and `cx views status --json` use the normalized
+`cxdeck.inventory/v1` model. Conversation, runtime, external-process, and view
+health are reported separately. `cx find QUERY` searches local display name,
+group, cwd, and UUID metadata only; it never reads transcripts or terminal
+contents. `cx focus --next|--previous` navigates existing verified views without
+opening a client. Workspace-scoped `views refresh` and `views rebuild` repair
+presentation only and never resume a saved conversation.
 
 ## Native iTerm experience
 
@@ -163,8 +183,9 @@ a restart:
 - `INCOMPATIBLE`: CX Deck cannot safely assume the runtime contract and fails
   closed for affected operations.
 
-v0.6 zmx sessions are fully usable under v0.7 and report
-`UPGRADE_AVAILABLE`. Their launch-time labels remain truthful and unchanged.
+v0.6 and v0.7 zmx sessions are fully usable under v0.8 and report
+`UPGRADE_AVAILABLE`. Their launch-time labels remain truthful and unchanged;
+the v0.8 workspace and navigation features require no runtime regeneration.
 
 ## Architecture
 

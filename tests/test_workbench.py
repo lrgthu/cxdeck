@@ -67,6 +67,15 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.read()['workspaces'], {})
         self.assertFalse(self.root.exists())
 
+    def test_existing_read_does_not_change_directory_metadata(self):
+        self.store.annotate(['key'], name='Synthetic')
+        os.chmod(self.root, 0o750)
+        before = self.root.stat()
+        self.assertEqual(self.store.read()['agents']['key']['name'], 'Synthetic')
+        after = self.root.stat()
+        self.assertEqual(after.st_mode & 0o777, 0o750)
+        self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+
     def test_atomic_updates_backup_and_permissions(self):
         self.store.annotate(['key'], name='审阅')
         self.store.annotate(['key'], pinned=True)
@@ -112,6 +121,15 @@ class StoreTests(unittest.TestCase):
         self.root.symlink_to(dest)
         with self.assertRaises(st.StateError):
             self.store.annotate(['x'], pinned=True)
+
+    def test_symlinked_state_ancestor_is_refused(self):
+        base = self.root.parent / 'ancestor-test'
+        target = self.root.parent / 'ancestor-target'
+        target.mkdir()
+        base.symlink_to(target)
+        store = st.Store(base / 'cxdeck/workbench')
+        with self.assertRaisesRegex(st.StateError, 'symlink'):
+            store.annotate(['x'], pinned=True)
 
     def test_unknown_schema_refused(self):
         self.root.mkdir()
@@ -198,7 +216,7 @@ class WorkbenchFixture(unittest.TestCase):
 
 class ViewTests(WorkbenchFixture):
     def show(self, gui, rows=None, **kwargs):
-        with patch.object(ui, 'client_map', side_effect=lambda b: gui.clients), \
+        with patch.object(ui, 'client_map', side_effect=lambda b, *args: gui.clients), \
              patch.object(ui.shutil, 'which', side_effect=lambda x: '/bin/' + x):
             return ui.show(self.rows if rows is None else rows, self.b, self.store, gui=gui, **kwargs)
 
@@ -214,6 +232,8 @@ class ViewTests(WorkbenchFixture):
         gui = FakeGUI({})
         gui.targets = ['cx-agent-1']
         self.assertEqual(self.show(gui)['opened'], 1)
+        self.assertEqual(self.store.read()['views'][self.rows[0]['_key']],
+                         {'guid': 'gcx-agent-1', 'tty': '/dev/tty1'})
         self.assertEqual(self.show(gui)['reused'], 1)
         self.assertEqual(len(gui.calls), 1)
 
@@ -239,6 +259,14 @@ class ViewTests(WorkbenchFixture):
         with self.assertRaisesRegex(st.StateError, 'Multiple zmx clients attached'):
             self.show(gui)
         self.assertEqual(len(gui.calls), 1)
+        self.assertEqual(self.store.read()['views'], {})
+
+    def test_incomplete_gui_receipts_are_never_persisted(self):
+        gui = FakeGUI({})
+        gui.targets = []
+        with self.assertRaisesRegex(st.StateError, 'incomplete view receipt'):
+            self.show(gui)
+        self.assertEqual(self.store.read()['views'], {})
 
     def test_stale_cached_view_refuses_duplicate(self):
         v = dict(guid='old', tty='/dev/tty1')
@@ -309,6 +337,21 @@ class ManagementTests(WorkbenchFixture):
         with self.assertRaises(st.StateError):
             w.resolve('agent-1', self.b)
 
+    def test_nonbinding_resolve_uses_one_process_snapshot_without_labels(self):
+        outer = self
+        class Backend:
+            store = outer.store
+            def processes(inner):
+                return {101: {'pid': 101}}
+            def raw_snapshot(inner, **kwargs):
+                outer.assertEqual(kwargs, {'bind_threads': False,
+                    'process_table': {101: {'pid': 101}}, 'include_diagnostics': False})
+                return dict(sessions=copy.deepcopy(outer.rows), context=CTX, warnings=[])
+            def snapshot(inner):
+                outer.fail('binding snapshot must not be used')
+        self.assertEqual(w.resolve('cx-agent-1', Backend(), bind_threads=False)['sid'],
+                         'cx-agent-1')
+
     def test_rename_does_not_change_native_identity(self):
         self.rows[0]['attached'] = 1
         item = conversation(self.rows[0])
@@ -375,6 +418,42 @@ class ManagementTests(WorkbenchFixture):
                  patch.object(w, 'launch_selected') as launch:
                 w.workspace_command(['open', 'research', '--all', *flags], self.b)
                 self.assertIs(launch.call_args.args[2].yolo, expected)
+
+    def test_adaptive_workspace_preview_uses_nonbinding_runtime_snapshot(self):
+        self.store.workspace('preview', dict(host=socket.gethostname(), members=[],
+                                             layout=dict(per_tab=0, min_columns=70, min_rows=12)))
+        self.b.processes.return_value = {}
+        self.b.raw_snapshot.return_value = dict(sessions=[], context=CTX, warnings=[])
+        provider_seen = []
+        runtime = Mock()
+        runtime.codex_home.return_value = HOME
+        runtime.inventory.side_effect = lambda history, home, provider: (
+            provider_seen.append(provider.snapshot()) or ([], [], [], False))
+        runtime.add_launch_policy_arguments.side_effect = lambda parser: parser.set_defaults(yolo=True)
+        before = self.store.path.read_bytes()
+        with patch.object(w, 'native', return_value=runtime), contextlib.redirect_stdout(io.StringIO()):
+            w.workspace_command(['open', 'preview', '--adaptive', '--list'], self.b)
+        self.b.snapshot.assert_not_called()
+        self.b.raw_snapshot.assert_called_once_with(
+            bind_threads=False, process_table={}, include_diagnostics=False)
+        self.assertEqual(provider_seen[0]['sessions'], [])
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_malformed_exact_layout_blocks_exact_but_adaptive_preview_still_works(self):
+        self.store.workspace('rollback', dict(
+            host=socket.gethostname(), members=[], exact_layout={'schema': 'broken'},
+            layout=dict(per_tab=0, min_columns=70, min_rows=12)))
+        runtime = Mock()
+        runtime.add_launch_policy_arguments.side_effect = lambda parser: parser.set_defaults(yolo=True)
+        with patch.object(w, 'native', return_value=runtime), \
+             patch.object(w, 'workspace_plan', return_value=([], [], [])) as plan, \
+             contextlib.redirect_stdout(io.StringIO()):
+            w.workspace_command(['open', 'rollback', '--adaptive', '--list'], self.b)
+        plan.assert_called_once_with(self.store.read()['workspaces']['rollback'], self.b,
+                                     bind_threads=False)
+        with patch.object(w, 'native', return_value=runtime), \
+             self.assertRaisesRegex(st.StateError, 'invalid saved exact layout'):
+            w.workspace_command(['open', 'rollback', '--list'], self.b)
 
 
 class ResumeSafetyTests(WorkbenchFixture):
@@ -450,12 +529,36 @@ class ResumeSafetyTests(WorkbenchFixture):
 
 
 class DashboardTests(WorkbenchFixture):
+    def inventory(self):
+        records = []
+        for row in self.rows:
+            records.append({
+                'key': row['_key'], 'identity': None,
+                'conversation_state': 'LIVE_ONLY_UNBOUND', 'runtime_state': row['state'],
+                'view_state': 'NO_VIEW',
+                'display': {'name': row['display_name'], 'pinned': row['pinned'],
+                            'group': 'Ungrouped', 'group_id': None, 'workspaces': []},
+                'runtime': {'managed': True, 'session': row['session'],
+                            'codex_pids': row['codex_pids'], 'live_key': row['_key']},
+                'view': {'verified': False, 'guid': None, 'tty': None, 'attached_count': 0},
+                'history': {'saved': False, 'updated_at': None, 'cwd': row['launch_cwd']},
+                'external': {'pids': []}, 'recent_at': None, 'recent_source': None,
+                '_managed': row})
+        return {'schema': 'cxdeck.inventory/v1', 'host': CTX['host'], 'timestamp': 1,
+                'conversations': records, 'unidentified_pids': [],
+                'process_inspection_failed': False,
+                'view_provider': {'available': True, 'error': None}, 'warnings': [],
+                'context': CTX}
+
     def screen(self, keys):
         win = Mock()
         win.getmaxyx.return_value = (15, 80)
         win.get_wch.side_effect = keys
         r = types.SimpleNamespace(clip=lambda text, width: text[:width])
-        with patch.object(w, 'native', return_value=r), patch.object(w.sys.stdin, 'isatty', return_value=True), \
+        with patch.object(w, 'native', return_value=r), \
+             patch.object(w, '_read_history', return_value=([], False, None)), \
+             patch.object(w, 'inventory_snapshot', side_effect=lambda b, **kw: self.inventory()), \
+             patch.object(w.sys.stdin, 'isatty', return_value=True), \
              patch.object(w.sys.stdout, 'isatty', return_value=True), patch.object(w.curses, 'curs_set'), \
              patch.object(w.curses, 'wrapper', side_effect=lambda fn: fn(win)):
             w.dashboard(self.b)
@@ -473,23 +576,24 @@ class DashboardTests(WorkbenchFixture):
         self.screen(['j', 'k', ' ', '\n', 'q'])
 
     def test_noninteractive_dashboard_is_one_snapshot(self):
-        with patch.object(w.sys.stdin, 'isatty', return_value=False), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(w.sys.stdin, 'isatty', return_value=False), \
+             patch.object(w, 'inventory_snapshot', return_value=self.inventory()) as observe, \
+             contextlib.redirect_stdout(io.StringIO()):
             w.dashboard(self.b)
-        self.assertEqual(self.b.snapshot.call_count, 1)
+        observe.assert_called_once_with(self.b)
 
     def test_json_status_has_backend_core_and_explicit_unknowns(self):
         with patch.object(w.sys.stdin, 'isatty', return_value=False), \
+                patch.object(w, 'inventory_snapshot', return_value=self.inventory()), \
                 contextlib.redirect_stdout(io.StringIO()) as output:
             w.dashboard(self.b, as_json=True)
-        row = json.loads(output.getvalue())['sessions'][0]
-        self.assertEqual(row['backend'], 'zmx')
-        self.assertEqual(row['runtime_version'], '0.8.1')
-        self.assertEqual(row['thread_id'], 'UNKNOWN')
-        self.assertEqual(row['launch_policy'], 'UNKNOWN')
-        self.assertEqual(row['launch_mode'], 'UNKNOWN')
-        self.assertEqual(row['cx_version'], '0.6.0')
-        self.assertEqual(row['upgrade_state'], 'UPGRADE_AVAILABLE')
-        self.assertEqual(row['state'], 'ALIVE')
+        payload = json.loads(output.getvalue())
+        row = payload['conversations'][0]
+        self.assertEqual(payload['schema'], 'cxdeck.inventory/v1')
+        self.assertEqual(row['conversation_state'], 'LIVE_ONLY_UNBOUND')
+        self.assertEqual(row['runtime_state'], 'ALIVE')
+        self.assertEqual(row['view_state'], 'NO_VIEW')
+        self.assertNotIn('_managed', row)
 
     def test_invalid_interval_refused(self):
         for value in (0, float('nan'), float('inf')):

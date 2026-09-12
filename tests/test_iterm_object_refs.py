@@ -37,6 +37,14 @@ class ITermObjectReferenceTests(unittest.TestCase):
         self.assertNotIn('set bestPane to s', script)
         self.assertNotIn('set anchorPane to s', script)
 
+    def test_inventory_materializes_guid_and_tty_as_scalar_text(self):
+        script = cx_iterm.APPLESCRIPT
+        self.assertIn('set sessionGuid to (get unique id of s) as text', script)
+        self.assertIn('set sessionTTY to (get tty of s) as text', script)
+        self.assertIn('set output to output & sessionGuid & (ASCII character 9) & sessionTTY',
+                      script)
+        self.assertNotIn('set output to output & (unique id of s)', script)
+
     def test_layout_still_uses_returned_objects_only_immediately(self):
         script = cx_iterm.APPLESCRIPT
         # Fresh objects returned by iTerm are read immediately, then converted to IDs.

@@ -18,7 +18,7 @@ INSTALL_MARKER = '.cxdeck-owned'
 MARKER = b'CX Deck installation v1\n'
 FILES = ('cxdeck.zsh', 'cx_version.py', 'cx_paths.py', 'cx_zmx.py', 'cx_upgrade.py', 'agent_console.py',
          'console_entry.py', 'codex_resume.py', 'cx_store.py', 'cx_iterm.py',
-         'workbench.py')
+         'cx_workspace_layout.py', 'cx_workspace_restore.py', 'cx_inventory.py', 'workbench.py')
 
 
 def atomic_write(dest, data, mode=0o600):

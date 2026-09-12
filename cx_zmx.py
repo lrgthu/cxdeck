@@ -513,16 +513,27 @@ def _bind_threads(records, procs, warnings):
         claims[(row["codex_home"], tid)] = row["session"]
 
 
-def snapshot(bind_threads=True):
+_PROCESS_TABLE_UNSET = object()
+
+
+def snapshot(bind_threads=True, process_table=_PROCESS_TABLE_UNSET, include_diagnostics=True):
     info = preflight()
     records = list_sessions(info["path"], info=info)
     warnings = []
-    try:
-        procs = processes()
-    except Error as exc:
-        procs = None
-        warnings.append(str(exc))
-    gpu, git_cache = gpu_state(), {}
+    if process_table is _PROCESS_TABLE_UNSET:
+        try:
+            procs = processes()
+        except Error as exc:
+            procs = None
+            warnings.append(str(exc))
+    else:
+        procs = process_table
+        if procs is None:
+            warnings.append('Process inspection failed; liveness and client verification are unavailable.')
+    gpu = (gpu_state() if include_diagnostics else
+           {'status': 'not-collected', 'scope': 'inventory-only snapshot',
+            'devices': [], 'jobs': [], 'error': None})
+    git_cache = {}
     for row in records:
         tree = descendants([row["daemon_pid"]], procs) if procs is not None else set()
         living = {pid for pid in tree if not procs[pid]["stat"].startswith("Z")} if procs is not None else set()
@@ -537,9 +548,10 @@ def snapshot(bind_threads=True):
             rss_tree_mib=round(sum(procs[pid]["rss_kib"] for pid in living) / 1024, 1) if procs is not None else None,
             elapsed=procs[codex[0]]["elapsed"] if codex and procs is not None else None)
         root = row.get("root", "")
-        if root not in git_cache:
-            git_cache[root] = git_state(root)
-        row.update(git_cache[root])
+        if include_diagnostics:
+            if root not in git_cache:
+                git_cache[root] = git_state(root)
+            row.update(git_cache[root])
         row["gpu_jobs"] = []
         for job in gpu["jobs"]:
             if job["pid"] in living:
@@ -560,30 +572,40 @@ def snapshot(bind_threads=True):
                      runtime_path=info["path"], runtime_version=info["version"]))
 
 
-def client_ttys(row, procs=None):
-    """Verify attach clients by exact-generation token and controlling TTY."""
-    procs = procs or processes()
+def client_tty_map(rows, procs=None):
+    """Verify attach clients for many generations in one bounded client pass."""
+    if not rows:
+        return {}
+    procs = processes() if procs is None else procs
     candidates = [process for process in procs.values()
                   if Path(process["executable"]).name == "zmx" and process["tty"] not in ("?", "??", "-")]
-    token, matched = generation_token(row), set()
+    tokens = {generation_token(row): row['sid'] for row in rows}
+    matched = {row['sid']: set() for row in rows}
     if sys.platform.startswith("linux"):
         for process in candidates:
             try:
                 environment = Path(f"/proc/{process['pid']}/environ").read_bytes().split(b"\0")
             except OSError:
                 continue
-            if ("CX_ZMX_GENERATION=" + token).encode() in environment:
-                matched.add("/dev/" + process["tty"].removeprefix("/dev/"))
+            values = [value.split(b'=', 1)[1].decode('ascii', 'ignore') for value in environment
+                      if value.startswith(b'CX_ZMX_GENERATION=')]
+            if len(values) == 1 and values[0] in tokens:
+                matched[tokens[values[0]]].add("/dev/" + process["tty"].removeprefix("/dev/"))
         return matched
-    marker = "CX_ZMX_GENERATION=" + token
     for process in candidates:
         try:
             output = run(["ps", "eww", "-p", str(process["pid"]), "-o", "command="], timeout=3)
         except Error:
             continue
-        if re.search(r"(?:^|\s)" + re.escape(marker) + r"(?:\s|$)", output):
-            matched.add("/dev/" + process["tty"].removeprefix("/dev/"))
+        values = re.findall(r"(?:^|\s)CX_ZMX_GENERATION=([0-9a-f]{64})(?=\s|$)", output)
+        if len(values) == 1 and values[0] in tokens:
+            matched[tokens[values[0]]].add("/dev/" + process["tty"].removeprefix("/dev/"))
     return matched
+
+
+def client_ttys(row, procs=None):
+    """Verify attach clients by exact-generation token and controlling TTY."""
+    return client_tty_map([row], procs)[row['sid']]
 
 
 def _attach_verified(argv):

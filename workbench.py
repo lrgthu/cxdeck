@@ -5,6 +5,7 @@ No prompts, approvals, automatic commits, process kills or remote commands.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import copy
 import curses
 import json
@@ -13,9 +14,11 @@ import os
 import socket
 import sys
 import time
+import types
 
 from cx_store import Store, StateError, live_key, thread_key, name
 import cx_iterm
+import cx_inventory
 from cx_version import VERSION
 
 
@@ -44,8 +47,17 @@ def enrich(data, b, store):
     return data
 
 
-def resolve(token, b):
-    rows = b.snapshot()['sessions']
+def runtime_snapshot(b, *, bind_threads=True):
+    """Take one runtime snapshot, optionally forbidding discovery-label writes."""
+    if bind_threads or not callable(getattr(type(b), 'raw_snapshot', None)):
+        return b.snapshot()
+    procs = b.processes()
+    return enrich(b.raw_snapshot(bind_threads=False, process_table=procs,
+                                 include_diagnostics=False), b, b.store)
+
+
+def resolve(token, b, *, bind_threads=True):
+    rows = runtime_snapshot(b, bind_threads=bind_threads)['sessions']
     exact = [r for r in rows if r['session'] == token]
     matches = exact or [r for r in rows if token in (r['task'], r.get('display_name'), r.get('thread_id'))]
     if len(matches) != 1:
@@ -53,9 +65,16 @@ def resolve(token, b):
     return matches[0]
 
 
-def catalog(b, history=()):
+def catalog(b, history=(), *, bind_threads=True):
     r = native()
-    rows, unknown, warnings, failed = r.inventory(history, r.codex_home(), b)
+    if bind_threads:
+        provider = b
+    else:
+        procs = b.processes()
+        raw = enrich(b.raw_snapshot(bind_threads=False, process_table=procs,
+                                    include_diagnostics=False), b, b.store)
+        provider = types.SimpleNamespace(snapshot=lambda: copy.deepcopy(raw))
+    rows, unknown, warnings, failed = r.inventory(history, r.codex_home(), provider)
     state = b.store.read()
     groups = state.get('groups', {})
     for item in rows:
@@ -78,8 +97,9 @@ def catalog(b, history=()):
 
 
 def annotate(token, b, title=None, pinned=None):
-    row = resolve(token, b)
-    observed = next((x for x in catalog(b)[0] if (x.get('managed') or {}).get('_key') == row['_key']), None)
+    row = resolve(token, b, bind_threads=False)
+    observed = next((x for x in catalog(b, bind_threads=False)[0]
+                     if (x.get('managed') or {}).get('_key') == row['_key']), None)
     keys = [row['_key'], row.get('_thread_key')]
     if observed and observed.get('thread_id'):
         keys.append(thread_key(observed['home'], observed['thread_id'], socket.gethostname()))
@@ -117,26 +137,233 @@ def focus_rows(rows, b, mode='window', **options):
     return result
 
 
-def views_command(argv, b):
+def _read_history(limit=2000):
+    r = native()
+    try:
+        history, truncated = r.list_history(r.codex_home(), limit)
+        warning = None
+    except (RuntimeError, OSError) as exc:
+        history, truncated, warning = [], False, 'Saved history unavailable: ' + str(exc)
+    return history, truncated, warning
+
+
+def inventory_snapshot(b, history=None, gui=None, history_warning=None):
+    """Collect each external source once, then compose without changing reality."""
+    r = native()
+    if history is None:
+        history, _, history_warning = _read_history()
+    client_error, procs = None, None
+    try:
+        procs = b.processes()
+    except (RuntimeError, OSError) as exc:
+        client_error = exc
+    raw = b.raw_snapshot(bind_threads=False, process_table=procs, include_diagnostics=False)
+    proxy = types.SimpleNamespace(snapshot=lambda: copy.deepcopy(raw))
+    rows, unknown, warnings, failed = r.inventory(history, r.codex_home(), proxy)
+    if client_error:
+        clients = {row.get('sid'): None for row in raw.get('sessions', [])}
+    else:
+        try:
+            clients = {sid: sorted(ttys) for sid, ttys in
+                       b.client_tty_map(raw.get('sessions', []), procs).items()}
+        except (RuntimeError, OSError) as exc:
+            client_error = exc
+            clients = {row.get('sid'): None for row in raw.get('sessions', [])}
+    view_error, views = None, None
+    gui = gui or cx_iterm.ITerm()
+    try:
+        views = gui.inventory()
+    except (RuntimeError, OSError) as exc:
+        view_error = exc
+    if history_warning:
+        warnings = [history_warning, *warnings]
+    return cx_inventory.compose(
+        history, rows, raw.get('context', {}), b.store.read(), clients,
+        iterm_views=views, view_error=view_error, client_error=client_error,
+        unknown_pids=unknown, process_failed=failed, warnings=warnings,
+        timestamp=raw.get('timestamp'), process_table=procs)
+
+
+def _workspace_inventory(snapshot, store_state, workspace_name):
+    if workspace_name not in store_state.get('workspaces', {}):
+        raise StateError('No workspace with this exact name. Use cx workspace list.')
+    workspace = store_state['workspaces'][workspace_name]
+    if workspace.get('host') != snapshot.get('host'):
+        raise StateError('Workspace belongs to another host; no presentation action was changed.')
+    identities = []
+    members = workspace.get('members')
+    if not isinstance(members, list):
+        raise StateError('Workspace membership metadata is invalid.')
+    for member in members:
+        if not isinstance(member, dict) or not member.get('home') or not member.get('thread_id'):
+            raise StateError('Workspace-scoped view commands require exact UUID-backed members.')
+        identities.append((workspace['host'], os.path.realpath(member['home']), member['thread_id']))
+    if len(identities) != len(set(identities)):
+        raise StateError('Workspace contains duplicate conversation identities.')
+    index = {(record['identity']['host'], record['identity']['codex_home'],
+              record['identity']['thread_id']): record
+             for record in snapshot['conversations'] if record.get('identity')}
+    missing = [identity[2] for identity in identities if identity not in index]
+    if missing:
+        raise StateError('Workspace conversation is absent from current inventory: ' + ', '.join(missing))
+    return [index[identity] for identity in identities]
+
+
+def _view_records(snapshot, b, workspace=None):
+    records = snapshot['conversations']
+    if workspace:
+        records = _workspace_inventory(snapshot, b.store.read(), workspace)
+    else:
+        records = [record for record in records if record['runtime']['managed']]
+    return records
+
+
+def _print_view_status(records, b):
+    print(f"{'VIEW':20} {'NAME':32} {'RUNTIME':12} CLIENTS")
+    for record in records:
+        print(f"{record['view_state']:20} {b.clean(record['display']['name'])[:32]:32} "
+              f"{record['runtime_state']:12} {record['view']['attached_count']}")
+
+
+def _verified_receipts(records):
+    return {record['runtime']['live_key']: {'guid': record['view']['guid'], 'tty': record['view']['tty']}
+            for record in records if record['runtime'].get('live_key') and record['view'].get('verified')}
+
+
+def views_command(argv, b, *, gui=None):
     parser = argparse.ArgumentParser(prog='cx views')
-    parser.add_argument('command', choices=('rebuild', 'refresh'))
+    sub = parser.add_subparsers(dest='command', required=True)
+    status = sub.add_parser('status')
+    status.add_argument('--json', action='store_true')
+    status.add_argument('--workspace')
+    rebuild = sub.add_parser('rebuild')
+    rebuild.add_argument('--workspace')
+    refresh = sub.add_parser('refresh')
+    refresh.add_argument('--workspace')
+    args = parser.parse_args(argv)
+    history, _, history_warning = _read_history()
+    observe = lambda: inventory_snapshot(b, history=history, gui=gui,
+                                         history_warning=history_warning)
+    snapshot = observe()
+    records = _view_records(snapshot, b, args.workspace)
+    if args.command == 'status':
+        if args.json:
+            output = cx_inventory.public(snapshot)
+            selected = {record['key'] for record in records}
+            output['conversations'] = [item for item in output['conversations']
+                                       if item['key'] in selected]
+            output['workspace'] = args.workspace
+            print(json.dumps(output, indent=2))
+        else:
+            _print_view_status(records, b)
+            for warning in snapshot['warnings']:
+                print('WARNING: ' + b.clean(warning))
+        return 0
+    if not args.workspace:
+        records = [record for record in records if record['runtime_state'] in ('ALIVE', 'STOPPED')]
+    ambiguous = [record for record in records if record['view_state'] in
+                 ('MULTIPLE_CLIENTS', 'UNVERIFIED_CLIENT', 'CHANGED_GENERATION', 'VIEW_UNKNOWN')]
+    unavailable = [record for record in records if not record['runtime']['managed'] or
+                   record['runtime_state'] not in ('ALIVE', 'STOPPED')]
+    if ambiguous:
+        raise StateError('Ambiguous presentation blocks this operation: ' + ', '.join(
+            record['display']['name'] + '=' + record['view_state'] for record in ambiguous))
+    if unavailable:
+        raise StateError('Presentation rebuild never starts runtimes; no live managed generation for: ' +
+                         ', '.join(record['display']['name'] for record in unavailable))
+    rows = [dict(record['_managed'], display_name=record['display']['name']) for record in records]
+    gui = gui or cx_iterm.ITerm()
+    if args.command == 'refresh':
+        refresh_rows = [row for row, record in zip(rows, records) if record['view'].get('verified')]
+        result = (cx_iterm.refresh(refresh_rows, b, b.store, gui=gui)
+                  if refresh_rows else dict(refreshed=0, missing=0))
+        result['missing'] += len(records) - len(refresh_rows)
+        fresh = observe()
+        fresh_records = _view_records(fresh, b, args.workspace)
+        changed = [record for record in fresh_records if record['view_state'] in
+                   ('MULTIPLE_CLIENTS', 'UNVERIFIED_CLIENT', 'CHANGED_GENERATION', 'VIEW_UNKNOWN')]
+        if changed:
+            raise StateError('Presentation changed during refresh; runtimes remain unchanged. ' + ', '.join(
+                record['display']['name'] + '=' + record['view_state'] for record in changed))
+        receipts = _verified_receipts(fresh_records)
+        if receipts:
+            b.store.set_view_receipts(receipts)
+        print(f"Presentation refreshed: {result['refreshed']}; no verified view: {result['missing']}. "
+              f"Receipts verified: {len(receipts)}. No agent restarted.")
+        return 0
+    result = focus_rows(rows, b, mode='window', gui=gui) if rows else dict(opened=0, reused=0)
+    fresh = observe()
+    fresh_records = _view_records(fresh, b, args.workspace)
+    still_bad = [record for record in fresh_records if record['view_state'] not in
+                 ('VERIFIED_VIEW', 'STALE_RECEIPT')]
+    if still_bad:
+        raise StateError('Presentation operation was partial; runtimes remain unchanged. ' + ', '.join(
+            record['display']['name'] + '=' + record['view_state'] for record in still_bad))
+    receipts = _verified_receipts(fresh_records)
+    if receipts:
+        b.store.set_view_receipts(receipts)
+    print(f"Verified zmx targets: {len(rows)}. Views opened: {result['opened']}; reused: {result['reused']}. "
+          f"Scope: {args.workspace or 'all managed conversations'}.")
+    return 0
+
+
+def find_command(argv, b):
+    parser = argparse.ArgumentParser(prog='cx find')
+    parser.add_argument('query')
+    parser.add_argument('--json', action='store_true')
     args = parser.parse_args(argv)
     try:
-        history, _ = native().list_history(native().codex_home(), 2000)
-    except (RuntimeError, OSError):
-        history = []
-    rows = []
-    for item in catalog(b, history)[0]:
-        row = item.get('managed')
-        if row and row.get('state') in ('ALIVE', 'STOPPED'):
-            rows.append(dict(row, display_name=item['title']))
-    if args.command == 'refresh':
-        result = cx_iterm.refresh(rows, b, b.store) if rows else dict(refreshed=0, missing=0)
-        print(f"Presentation refreshed: {result['refreshed']}; no verified view: {result['missing']}. No agent restarted.")
-        return 0
-    result = focus_rows(rows, b, mode='window') if rows else dict(opened=0, reused=0)
-    print(f"Verified zmx targets: {len(rows)}. Views opened: {result['opened']}; reused: {result['reused']}.")
+        found = cx_inventory.search(inventory_snapshot(b)['conversations'], args.query)
+    except cx_inventory.InventoryError as exc:
+        raise StateError(str(exc)) from exc
+    if args.json:
+        print(json.dumps({'schema': cx_inventory.SCHEMA, 'query': args.query,
+                          'matches': cx_inventory.public({'conversations': found})['conversations']}, indent=2))
+    else:
+        for record in found:
+            tid = (record.get('identity') or {}).get('thread_id') or 'UNBOUND'
+            print(f"{tid}  {record['conversation_state']:28} {record['runtime_state']:10} "
+                  f"{record['view_state']:18} {b.clean(record['display']['name'])}")
+        if not found:
+            print('No metadata matches.')
     return 0
+
+
+def focus_navigation(direction, b, *, gui=None, caller_tty=None):
+    if direction not in ('next', 'previous'):
+        raise StateError('Navigation direction must be next or previous.')
+    gui = gui or cx_iterm.ITerm()
+    history, _, history_warning = _read_history()
+    observe = lambda: inventory_snapshot(b, history=history, gui=gui,
+                                         history_warning=history_warning)
+    snapshot = observe()
+    candidates = [record for record in snapshot['conversations'] if record['view'].get('verified')]
+    if not candidates:
+        raise StateError('No uniquely verified CX Deck views are available to focus.')
+    caller = cx_iterm.caller_tty() if caller_tty is None else caller_tty
+    current = [index for index, record in enumerate(candidates) if record['view']['tty'] == caller]
+    if len(current) > 1:
+        raise StateError('Caller TTY maps to multiple conversations; no view focused.')
+    if current:
+        index = (current[0] + (1 if direction == 'next' else -1)) % len(candidates)
+    else:
+        index = 0 if direction == 'next' else len(candidates) - 1
+    chosen = candidates[index]
+    fresh = observe()
+    def identity(record):
+        durable = record.get('identity')
+        if durable:
+            return ('thread', durable['host'], durable['codex_home'], durable['thread_id'])
+        return ('generation', record.get('runtime', {}).get('live_key'))
+    matches = [record for record in fresh['conversations'] if identity(record) == identity(chosen)]
+    if (len(matches) != 1 or not matches[0]['view'].get('verified') or
+            (matches[0]['view']['guid'], matches[0]['view']['tty']) !=
+            (chosen['view']['guid'], chosen['view']['tty']) or
+            matches[0]['runtime'].get('generation') != chosen['runtime'].get('generation')):
+        raise StateError('Selected view changed during navigation; no new client was opened.')
+    gui.focus({'guid': chosen['view']['guid'], 'tty': chosen['view']['tty']})
+    print(f"Focused {b.clean(chosen['display']['name'])}; no client or runtime created.")
+    return chosen
 
 
 def new_agents(argv, b):
@@ -268,6 +495,32 @@ def resume(args, b):
         history, truncated = r.list_history(r.codex_home(), args.limit)
     except RuntimeError as exc:
         history, truncated, warning = [], False, str(exc)
+    if args.list or args.json:
+        snapshot = inventory_snapshot(b, history=history)
+        if warning:
+            snapshot['warnings'].insert(0, 'Saved history unavailable; managed sessions only: ' + warning)
+        if truncated:
+            snapshot['warnings'].append(f'History capped at {args.limit}; increase --limit for older entries.')
+        records = snapshot['conversations']
+        if getattr(args, 'group', None):
+            if args.group == '@ungrouped':
+                records = [record for record in records if record['display']['group_id'] is None]
+            else:
+                group_id, _ = b.store.resolve_group(args.group)
+                records = [record for record in records if record['display']['group_id'] == group_id]
+        if args.json:
+            output = cx_inventory.public(snapshot)
+            keys = {record['key'] for record in records}
+            output['conversations'] = [record for record in output['conversations'] if record['key'] in keys]
+            output['history_truncated'] = truncated
+            print(json.dumps(output, indent=2))
+        else:
+            for record in records:
+                print(f"{record['key']}  {record['conversation_state']:28} "
+                      f"{record['runtime_state']:10} {b.clean(record['display']['name'])}")
+            for message in snapshot['warnings']:
+                print('WARNING: ' + b.clean(message))
+        return
     rows, _, warnings, _ = catalog(b, history)
     if getattr(args, 'group', None):
         if args.group == '@ungrouped':
@@ -281,15 +534,6 @@ def resume(args, b):
         warnings.insert(0, 'Saved history unavailable; managed sessions only: ' + warning)
     if truncated:
         warnings.append(f'History capped at {args.limit}; increase --limit for older entries.')
-    if args.json:
-        print(json.dumps(dict(rows=rows, warnings=warnings, truncated=truncated), indent=2))
-        return
-    if args.list:
-        for row in rows:
-            print(f"{row['key']}  {row['state']:12}  {b.clean(row['title'])}")
-        for message in warnings:
-            print('WARNING: ' + b.clean(message))
-        return
     if args.select:
         index = {x['key']: x for x in rows}
         if any(key not in index for key in args.select):
@@ -335,7 +579,7 @@ def group_command(argv, b):
         print('Group deleted; conversations are now Ungrouped. No Codex history changed.')
         return
     history, _ = native().list_history(native().codex_home(), 2000)
-    rows = catalog(b, history)[0]
+    rows = catalog(b, history, bind_threads=False)[0]
     index = {}
     for row in rows:
         if row.get('thread_id'):
@@ -355,12 +599,13 @@ def group_command(argv, b):
 
 def workspace_save(title, b, tokens=None, replace=False, settings=None):
     title = name(title, 80)
-    data = b.snapshot()
-    rows = data['sessions'] if tokens is None else [resolve(t, b) for t in tokens]
+    data = runtime_snapshot(b, bind_threads=False)
+    rows = (data['sessions'] if tokens is None else
+            [resolve(t, b, bind_threads=False) for t in tokens])
     rows = list({r['_key']: r for r in rows}.values())
     if not rows:
         raise StateError('No sessions selected for this workspace; nothing saved.')
-    observed = catalog(b)[0]
+    observed = catalog(b, bind_threads=False)[0]
     members = []
     for row in rows:
         obs = next((x for x in observed if x.get('managed') and x['managed']['_key'] == row['_key']), {})
@@ -379,7 +624,7 @@ def workspace_save(title, b, tokens=None, replace=False, settings=None):
     return record
 
 
-def workspace_plan(record, b):
+def workspace_plan(record, b, *, bind_threads=True):
     if record.get('host') != socket.gethostname() or not isinstance(record.get('members'), list):
         raise StateError('Workspace belongs to another host or has invalid metadata; no remote actions attempted.')
     home = native().codex_home()
@@ -396,7 +641,7 @@ def workspace_plan(record, b):
             tid = native().thread_id(item['thread_id'])
             history.append(dict(key=tid, thread_id=tid, title=title, cwd=item.get('cwd'),
                 home=home, updated=record.get('saved_at', 0), managed=None, state='SAVED', external_pids=[]))
-    available = catalog(b, history)[0]
+    available = catalog(b, history, bind_threads=bind_threads)[0]
     rows, seen = [], set()
     for item in members:
         live = next((x for x in available if x.get('managed') and
@@ -414,6 +659,222 @@ def workspace_plan(record, b):
     return rows, history, missing
 
 
+def _capture_runtime_observation(b):
+    """Read zmx/process/view facts without binding labels or changing a runtime."""
+    procs = b.processes()
+    data = enrich(b.raw_snapshot(bind_threads=False, process_table=procs,
+                                 include_diagnostics=False), b, b.store)
+    for row in data['sessions']:
+        sid = row.get('sid')
+        if not isinstance(sid, str) or not sid:
+            raise StateError('Managed zmx session is missing its exact runtime ID.')
+    clients = {sid: sorted(ttys) for sid, ttys in
+               b.client_tty_map(data['sessions'], procs).items()}
+    state = b.store.read()
+    return {'context': data['context'], 'sessions': data['sessions'],
+            'clients': clients, 'views': copy.deepcopy(state['views'])}
+
+
+def workspace_capture(title, b, replace=False, provider=None, attempts=3):
+    """Capture exact presentation topology, then atomically update one workspace."""
+    from cx_workspace_layout import (LayoutError, capture_contract, capture_live,
+                                     conversation_identities)
+    title = name(title, 80)
+    state = b.store.read()
+    if title not in state['workspaces']:
+        raise StateError('No workspace with this exact name. Use cx workspace list.')
+    expected = copy.deepcopy(state['workspaces'][title])
+    if expected.get('exact_layout') is not None and not replace:
+        raise StateError('Workspace already has an exact layout. Use --replace deliberately; nothing overwritten.')
+    reader = lambda: _capture_runtime_observation(b)
+    try:
+        result = (asyncio.run(capture_contract(expected, provider, reader, attempts=attempts))
+                  if provider is not None else capture_live(expected, reader, attempts=attempts))
+    except LayoutError as exc:
+        raise StateError(str(exc)) from exc
+    b.store.set_workspace_layout(title, result.layout, expected, result.store_views,
+                                 replace=replace)
+    identities = conversation_identities(result.layout)
+    windows = result.layout['windows']
+    tabs = sum(len(window['tabs']) for window in windows)
+    print('Captured exact workspace layout:\n'
+          f'  workspace: {b.clean(title)}\n'
+          f'  conversations: {len(identities)}\n'
+          f'  windows: {len(windows)}\n'
+          f'  tabs: {tabs}\n'
+          '  topology: L3\n'
+          '  ratios: approximate')
+    return result.layout
+
+
+def _exact_runtime_observation(b, history, home):
+    """One nonbinding global runtime/process/client observation for exact restore."""
+    procs = b.processes()
+    raw = enrich(b.raw_snapshot(bind_threads=False, process_table=procs,
+                                include_diagnostics=False), b, b.store)
+    proxy = types.SimpleNamespace(snapshot=lambda: copy.deepcopy(raw))
+    rows, unknown, warnings, failed = native().inventory(history, home, proxy)
+    sessions = []
+    for item in rows:
+        if not item.get('managed'):
+            continue
+        row = copy.deepcopy(item['managed'])
+        if item.get('thread_id'):
+            row['thread_id'] = item['thread_id']
+            row['codex_home'] = item['home']
+        row['external_pids'] = list(item.get('external_pids') or [])
+        sessions.append(row)
+    clients = {sid: sorted(ttys) for sid, ttys in b.client_tty_map(sessions, procs).items()}
+    return {'context': raw['context'], 'sessions': sessions, 'clients': clients,
+            'views': copy.deepcopy(b.store.read()['views']), 'inventory': rows,
+            'unknown_pids': unknown, 'process_failed': failed, 'warnings': warnings}
+
+
+def workspace_open_exact(title, record, args, b):
+    """Resolve all runtimes, then MOVE_REUSE native presentation and verify it."""
+    import cx_workspace_restore as restore
+    r = native()
+    exact_layout = record.get('exact_layout')
+    try:
+        restore.validate_layout(exact_layout)
+    except restore.LayoutError as exc:
+        raise StateError('RUNTIME_BLOCKED: invalid saved exact layout: ' + str(exc)) from exc
+    home = r.codex_home()
+    history_error = None
+    try:
+        history, _ = r.list_history(home, 2000)
+    except (RuntimeError, OSError) as exc:
+        history, history_error = [], str(exc)
+
+    def observe():
+        return _exact_runtime_observation(b, history, home)
+
+    first = observe()
+    try:
+        plan = restore.build_runtime_plan(
+            exact_layout, record, first['inventory'], first['unknown_pids'],
+            first['process_failed'], host=socket.gethostname(), codex_home=home,
+            allow_unverified_live=args.allow_unverified_live, cwd_override=args.cwd,
+            planned_cwd=r.planned_cwd, context=first['context'])
+    except restore.RestoreError as exc:
+        detail = (' Saved history was unavailable: ' + history_error
+                  if history_error and 'absent from saved history' in str(exc) else '')
+        raise StateError(str(exc) + detail) from exc
+
+    if getattr(args, 'list', False):
+        for item in plan.items:
+            print(f'{item.classification:14} {b.clean(item.display_name)}  {item.identity[2]}')
+        print(f'Exact topology: {len(plan.layout["windows"])} window(s); '
+              f'{sum(len(window["tabs"]) for window in plan.layout["windows"])} tab(s). No action taken.')
+        return plan
+
+    # The complete presentation blueprint and caller conflict are checked before
+    # the first saved-only runtime is created.
+    if not args.no_iterm:
+        try:
+            restore.preflight_live(plan.layout, plan.items, observe, first['context'],
+                                   cx_iterm.caller_tty())
+        except restore.RestoreError as exc:
+            raise StateError(str(exc)) from exc
+
+    class ResumeFacade:
+        VERSION = b.VERSION
+        store = None
+        def __getattr__(self, key):
+            return getattr(b, key)
+
+    launched, failures = [], []
+    with r.launch_lock(home):
+        locked = observe()
+        try:
+            plan = restore.build_runtime_plan(
+                exact_layout, record, locked['inventory'], locked['unknown_pids'],
+                locked['process_failed'], host=socket.gethostname(), codex_home=home,
+                allow_unverified_live=args.allow_unverified_live, cwd_override=args.cwd,
+                planned_cwd=r.planned_cwd, context=locked['context'])
+        except restore.RestoreError as exc:
+            raise StateError(str(exc)) from exc
+        cold_identities = [item.identity for item in plan.items
+                           if item.classification == 'SAVED_ONLY']
+        for index, identity in enumerate(cold_identities):
+            if index:
+                try:
+                    latest = observe()
+                    plan = restore.build_runtime_plan(
+                        exact_layout, record, latest['inventory'], latest['unknown_pids'],
+                        latest['process_failed'], host=socket.gethostname(), codex_home=home,
+                        allow_unverified_live=args.allow_unverified_live, cwd_override=args.cwd,
+                        planned_cwd=r.planned_cwd, context=latest['context'])
+                except restore.RestoreError as exc:
+                    failures.append(str(exc))
+                    break
+            item = next(now for now in plan.items if now.identity == identity)
+            if item.classification == 'LIVE_MANAGED':
+                continue
+            if item.classification != 'SAVED_ONLY':
+                failures.append('Runtime classification changed unexpectedly for ' + identity[2])
+                break
+            try:
+                created, _ = r.ensure(item.row, ResumeFacade(), args.cwd, yolo=args.yolo)
+                launched.append((item, created))
+            except (RuntimeError, OSError) as exc:
+                failures.append(item.identity[2] + ': ' + str(exc))
+                break
+        if failures:
+            raise StateError('RUNTIME_PARTIAL: successful exact runtimes were retained; presentation was not started. ' +
+                             ' | '.join(failures))
+        fresh = observe()
+        try:
+            landed = restore.build_runtime_plan(
+                exact_layout, record, fresh['inventory'], fresh['unknown_pids'],
+                fresh['process_failed'], host=socket.gethostname(), codex_home=home,
+                allow_unverified_live=args.allow_unverified_live, cwd_override=args.cwd,
+                planned_cwd=r.planned_cwd, context=fresh['context'])
+        except restore.RestoreError as exc:
+            raise StateError('RUNTIME_PARTIAL: runtimes were kept, but full post-launch verification failed. ' +
+                             str(exc)) from exc
+        if any(item.classification != 'LIVE_MANAGED' for item in landed.items):
+            raise StateError('RUNTIME_PARTIAL: not every exact conversation became a verified managed runtime.')
+        try:
+            for item, _ in launched:
+                current = next(now for now in landed.items if now.identity == item.identity)
+                b.store.annotate([current.row['managed']['_key'], thread_key(
+                    item.identity[1], item.identity[2], item.identity[0])],
+                    name=item.display_name, launch_cwd=item.cwd)
+        except (RuntimeError, OSError) as exc:
+            raise StateError('RUNTIME_PARTIAL: exact runtimes were retained, but local display metadata '
+                             'could not be recorded; presentation was not started. ' + str(exc)) from exc
+
+    if args.no_iterm:
+        print(f'RUNTIME_RESOLVED: {len(landed.items)} exact conversations; presentation unchanged.')
+        return {'state': 'RUNTIME_RESOLVED', 'runtimes': len(landed.items)}
+
+    try:
+        final_observation = observe()
+        restore.revalidate_runtimes(landed.items, final_observation)
+        cx_iterm.ensure_profile(b.store.preference('timestamps', True))
+        result = restore.restore_live(
+            landed.layout, landed.items, observe, final_observation['context'],
+            cx_iterm.caller_tty())
+        b.store.set_view_receipts(result.view_receipts)
+    except restore.RestoreError as exc:
+        raise StateError(str(exc) + ' All resolved Codex/zmx runtimes were retained.') from exc
+    except (RuntimeError, OSError) as exc:
+        raise StateError('PRESENTATION_PARTIAL: exact runtime generations remain healthy; ' + str(exc)) from exc
+    print(f'{result.state}: exact workspace {b.clean(title)}\n'
+          f'  existing views reused: {result.existing_views_reused}\n'
+          f'  existing views moved: {result.existing_views_moved}\n'
+          f'  existing views presentation-rebuilt: {result.existing_views_rebuilt}\n'
+          f'  missing views created: {result.missing_views_created}\n'
+          '  topology: exact\n'
+          '  geometry: best effort')
+    for limitation in result.geometry_limitations:
+        print('  geometry limitation: ' + b.clean(limitation))
+    if not args.no_dashboard:
+        dashboard(b)
+    return result
+
+
 def workspace_command(argv, b):
     p = argparse.ArgumentParser(prog='cx workspace')
     sub = p.add_subparsers(dest='action', required=True)
@@ -425,12 +886,19 @@ def workspace_command(argv, b):
     save.add_argument('--per-tab', type=int, default=0)
     save.add_argument('--min-columns', type=int, default=70)
     save.add_argument('--min-rows', type=int, default=12)
+    capture = sub.add_parser('capture')
+    capture.add_argument('name')
+    capture.add_argument('--replace', action='store_true')
     op = sub.add_parser('open')
     op.add_argument('name')
     op.add_argument('--all', action='store_true', help='explicitly open all available members, without picker')
     op.add_argument('--list', action='store_true', help='preview only; no launches')
     op.add_argument('--no-iterm', action='store_true')
     op.add_argument('--no-dashboard', action='store_true')
+    op.add_argument('--adaptive', action='store_true',
+                    help='ignore optional exact layout and use the v0.7 adaptive view layout')
+    op.add_argument('--allow-unverified-live', action='store_true',
+                    help='accept unidentified-process risk only for saved-only cold resumes')
     op.add_argument('--cwd')
     op.add_argument('--per-tab', type=int)
     op.add_argument('--min-columns', type=int)
@@ -439,6 +907,8 @@ def workspace_command(argv, b):
     a = p.parse_args(argv)
     if a.action == 'save':
         return workspace_save(a.name, b, a.select, a.replace, layout(a))
+    if a.action == 'capture':
+        return workspace_capture(a.name, b, replace=a.replace)
     saved = b.store.read()['workspaces']
     if a.action == 'list':
         for title, record in saved.items():
@@ -446,7 +916,9 @@ def workspace_command(argv, b):
         return
     if a.name not in saved:
         raise StateError('No workspace with this exact name. Use cx workspace list.')
-    rows, history, missing = workspace_plan(saved[a.name], b)
+    if saved[a.name].get('exact_layout') is not None and not a.adaptive:
+        return workspace_open_exact(a.name, saved[a.name], a, b)
+    rows, history, missing = workspace_plan(saved[a.name], b, bind_threads=not a.list)
     for text in missing:
         print('Unavailable: ' + b.clean(text))
     if a.list:
@@ -459,46 +931,30 @@ def workspace_command(argv, b):
     for key, default in (('per_tab', 0), ('min_columns', 70), ('min_rows', 12)):
         if getattr(a, key) is None:
             setattr(a, key, settings.get(key, default))
-    a.allow_unverified_live = False
     chosen = rows if a.all else native().choose(rows, missing) if rows else []
     return launch_selected(chosen, history, a, b)
 
 
 def text_lines(data):
-    lines = [f"CX Deck {VERSION} | zmx | {data['context']['host']} | {len(data['sessions'])} agents"]
-    for row in sorted(data['sessions'], key=lambda r: (not r['pinned'], r['display_name'].casefold())):
-        lines.append(f"{'*' if row['pinned'] else ' '} {row['display_name']} | {row['state']} | clients={row['attached']} | PID={','.join(map(str, row['codex_pids'])) or '-'}")
-        lines.append('  ' + row['session'])
-    lines.append('ALIVE = process exists, not task progress. No automatic task instructions.')
+    lines = [f"CX Deck {VERSION} | zmx | {data['host']} | {len(data['conversations'])} conversations"]
+    for record in data['conversations']:
+        display, runtime = record['display'], record['runtime']
+        lines.append(f"{'*' if display['pinned'] else ' '} {display['name']} | "
+                     f"conversation={record['conversation_state']} | runtime={record['runtime_state']} | "
+                     f"view={record['view_state']}")
+        if runtime.get('session'):
+            lines.append('  ' + runtime['session'])
+    lines.append('ALIVE = process exists, not task progress. NO_VIEW does not mean stopped.')
     lines.extend('WARNING: ' + str(w) for w in data.get('warnings', []))
     return [''.join(c if c.isprintable() else '?' for c in s) for s in lines]
-
-
-def normalized_status(data, installed_version=VERSION):
-    """Stable JSON view with explicit zmx and runtime-compatibility fields."""
-    from cx_upgrade import runtime_compatibility
-    output = copy.deepcopy(data)
-    context = output.get('context', {})
-    for row in output.get('sessions', []):
-        row['backend'] = row.get('backend') or context.get('backend') or 'UNKNOWN'
-        row['runtime_version'] = row.get('runtime_version') or context.get('runtime_version') or 'UNKNOWN'
-        row['thread_id'] = row.get('thread_id') or 'UNKNOWN'
-        row['launch_policy'] = row.get('launch_policy') or 'UNKNOWN'
-        row['launch_mode'] = row.get('launch_mode') or 'UNKNOWN'
-        row['cx_version'] = row.get('cx_version') or row.get('labels', {}).get('cx_version') or 'UNKNOWN'
-        row['upgrade_state'] = runtime_compatibility(row['cx_version'], installed_version)
-        row['state'] = row.get('state') or 'UNKNOWN'
-    return output
 
 
 def dashboard(b, interval=3, once=False, as_json=False):
     if not math.isfinite(interval) or interval < 1:
         raise StateError('Refresh interval must be finite and at least one second.')
     if once or as_json or not (sys.stdin.isatty() and sys.stdout.isatty()):
-        data = b.snapshot()
-        installed = getattr(b, 'VERSION', VERSION)
-        installed = installed if isinstance(installed, str) else VERSION
-        print(json.dumps(normalized_status(data, installed), indent=2)
+        data = inventory_snapshot(b)
+        print(json.dumps(cx_inventory.public(data), indent=2)
               if as_json else '\n'.join(text_lines(data)))
         return
     def screen(win):
@@ -506,6 +962,7 @@ def dashboard(b, interval=3, once=False, as_json=False):
         win.timeout(200)
         selected, cursor, query, editing = set(), None, '', False
         data, message, refresh_at = None, '', 0
+        history_cache, history_warning, history_refresh_at = None, None, 0
         try:
             curses.curs_set(0)
         except curses.error:
@@ -525,16 +982,22 @@ def dashboard(b, interval=3, once=False, as_json=False):
         def ask(prompt):
             return input(prompt).strip()
         while True:
-            if time.monotonic() >= refresh_at:
+            now = time.monotonic()
+            if now >= refresh_at:
                 try:
-                    data = b.snapshot()
+                    if history_cache is None or now >= history_refresh_at:
+                        history_cache, _, history_warning = _read_history()
+                        history_refresh_at = now + 30
+                    data = inventory_snapshot(b, history=history_cache,
+                                              history_warning=history_warning)
                 except (RuntimeError, OSError) as exc:
                     message = 'Refresh failed; actions disabled: ' + str(exc)
                     data = None
                 refresh_at = time.monotonic() + interval
-            rows = sorted((data or {}).get('sessions', []), key=lambda r: (not r['pinned'], r['display_name'].casefold()))
-            rows = [r for r in rows if query.casefold() in (r['display_name'] + ' ' + r['session'] + ' ' + str(r.get('thread_id', ''))).casefold()]
-            keys = [r['_key'] for r in rows]
+            rows = list((data or {}).get('conversations', []))
+            if query.strip():
+                rows = cx_inventory.search(rows, query)
+            keys = [r['key'] for r in rows]
             if cursor not in keys:
                 cursor = keys[0] if keys else None
             pos = keys.index(cursor) if cursor else 0
@@ -553,8 +1016,11 @@ def dashboard(b, interval=3, once=False, as_json=False):
             page = max(1, h - 7)
             offset = (pos // page) * page
             for i, row in enumerate(rows[offset:offset + page], offset):
-                pid = ','.join(map(str, row['codex_pids'])) or '-'
-                put(4 + i - offset, f"{'[x]' if row['_key'] in selected else '[ ]'} {'*' if row['pinned'] else ' '} {row['display_name']} | {row['state']} | {row['attached']} views | PID {pid}", curses.A_REVERSE if row['_key'] == cursor else 0)
+                put(4 + i - offset,
+                    f"{'[x]' if row['key'] in selected else '[ ]'} "
+                    f"{'*' if row['display']['pinned'] else ' '} {row['display']['name']} | "
+                    f"{row['conversation_state']} | {row['runtime_state']} | {row['view_state']}",
+                    curses.A_REVERSE if row['key'] == cursor else 0)
             put(h - 2, message or 'ALIVE means process exists; it does not mean task complete.')
             put(h - 1, 'No research repo required. q / Ctrl-C closes only this console.')
             win.refresh()
@@ -591,20 +1057,40 @@ def dashboard(b, interval=3, once=False, as_json=False):
                 refresh_at = 0
             elif cursor and data is not None:
                 current = rows[pos]
-                targets = [r for r in data['sessions'] if r['_key'] in selected] if selected else [current]
-                stale = selected - {r['_key'] for r in data['sessions']}
+                targets = [r for r in data['conversations'] if r['key'] in selected] if selected else [current]
+                stale = selected - {r['key'] for r in data['conversations']}
                 if stale and key in ('\n', '\r', 's'):
                     message = 'A selected session disappeared. Selection cleared; choose again.'
                     selected.clear()
                     continue
                 if key in ('\n', '\r'):
-                    message = external(lambda: focus_rows(targets, b))
+                    managed = [r['_managed'] for r in targets if r.get('_managed') and
+                               r['runtime_state'] in ('ALIVE', 'STOPPED')]
+                    if len(managed) != len(targets):
+                        message = 'Selected saved/external conversation has no managed view; use cx resume --select UUID.'
+                        continue
+                    message = external(lambda: focus_rows([
+                        dict(row, display_name=record['display']['name'])
+                        for row, record in zip(managed, targets)], b))
                 elif key == 'r':
-                    message = external(lambda: annotate(current['session'], b, title=ask('New display name: ')))
+                    if not current.get('_managed'):
+                        message = 'Rename from the dashboard currently requires a managed conversation.'
+                        continue
+                    message = external(lambda: annotate(current['_managed']['session'], b,
+                                                         title=ask('New display name: ')))
                 elif key == 'p':
-                    message = external(lambda: annotate(current['session'], b, pinned=not current['pinned']))
+                    if not current.get('_managed'):
+                        message = 'Pin from the dashboard currently requires a managed conversation.'
+                        continue
+                    message = external(lambda: annotate(current['_managed']['session'], b,
+                                                         pinned=not current['display']['pinned']))
                 elif key == 's':
-                    message = external(lambda: workspace_save(ask(f'Save {len(targets)} selected session(s) as: '), b, [r['session'] for r in targets]))
+                    if any(not r.get('_managed') for r in targets):
+                        message = 'Workspace save requires managed conversations; selection was not changed.'
+                        continue
+                    message = external(lambda: workspace_save(
+                        ask(f'Save {len(targets)} selected session(s) as: '), b,
+                        [r['_managed']['session'] for r in targets]))
                 else:
                     continue
                 refresh_at = 0

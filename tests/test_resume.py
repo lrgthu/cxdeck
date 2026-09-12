@@ -81,15 +81,20 @@ class IdentityAndLayoutTests(unittest.TestCase):
 
     def test_resume_registered_not_treated_as_task(self):
         console = Mock()
-        with patch.object(r, "execute") as execute:
+        backend = Mock()
+        with patch.object(entry, 'ResumeBackend', return_value=backend), \
+             patch('workbench.resume') as execute:
             self.assertEqual(entry.main(["resume", "--list"], console), 0)
         self.assertTrue(execute.call_args.args[0].list)
+        self.assertIs(execute.call_args.args[1], backend)
         console.main.assert_not_called()
 
     def test_resume_policy_flags_use_custom_resume_routing(self):
         for flag, expected in (("--yolo", True), ("--safe", False), ("--no-yolo", False)):
             console = Mock()
-            with self.subTest(flag=flag), patch.object(r, "execute") as execute:
+            backend = Mock()
+            with self.subTest(flag=flag), patch.object(entry, 'ResumeBackend', return_value=backend), \
+                 patch('workbench.resume') as execute:
                 self.assertEqual(entry.main(["resume", flag, "--list"], console), 0)
                 self.assertIs(execute.call_args.args[0].yolo, expected)
                 console.main.assert_not_called()
@@ -246,6 +251,16 @@ class InventoryAndSafetyTests(unittest.TestCase):
     def test_external_live_thread_is_marked(self):
         with patch.object(cx, "snapshot", return_value=self.data(outside=[7])), patch.object(r, "open_thread_files", return_value={7: {ID1}}):
             rows, unknown, _, _ = r.inventory([row()], TEST_HOME, cx)
+        self.assertEqual(rows[0]["state"], "LIVE-OUTSIDE")
+        self.assertEqual(rows[0]["external_pids"], [7])
+        self.assertEqual(unknown, [])
+
+    def test_known_external_without_saved_history_is_an_exact_record(self):
+        with patch.object(cx, "snapshot", return_value=self.data(outside=[7])), \
+             patch.object(r, "open_thread_files", return_value={7: {ID1}}):
+            rows, unknown, _, _ = r.inventory([], TEST_HOME, cx)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["thread_id"], ID1)
         self.assertEqual(rows[0]["state"], "LIVE-OUTSIDE")
         self.assertEqual(rows[0]["external_pids"], [7])
         self.assertEqual(unknown, [])

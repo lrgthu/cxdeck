@@ -12,7 +12,7 @@ MIN_RUNTIME_CX_VERSION = "0.6.0"
 
 # Each entry is (controller version introducing a runtime requirement,
 # minimum cx version that may have created the session). There are no runtime
-# regeneration boundaries through v0.7; add one only when a future release truly
+# regeneration boundaries through v0.8; add one only when a future release truly
 # requires a controlled replacement generation.
 RUNTIME_REQUIREMENTS = ()
 STATES = ("CURRENT", "UPGRADE_AVAILABLE", "UPGRADE_REQUIRED", "INCOMPATIBLE")

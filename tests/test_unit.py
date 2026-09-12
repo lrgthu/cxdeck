@@ -1,6 +1,7 @@
 """Installer unit tests using only temporary home directories."""
 from pathlib import Path
 import os
+import json
 import shlex
 import subprocess
 import sys
@@ -13,6 +14,31 @@ import cx_iterm
 
 
 class InstallerTests(unittest.TestCase):
+    def test_v070_upgrade_preserves_v1_state_and_installs_every_v080_module(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            source = Path(__file__).resolve().parents[1]
+            (home / '.zshrc').write_text('# personal\n')
+            installer.install(home, source, configure_iterm=False)
+            module = home / '.local/share/cxdeck'
+            (module / 'cx_version.py').write_text('VERSION = "0.7.0"\n')
+            state = home / '.local/state/cxdeck/workbench/state.json'
+            state.parent.mkdir(parents=True, exist_ok=True)
+            payload = {'version': 1, 'agents': {'synthetic': {'name': 'Model Study'}},
+                       'views': {'generation': {'guid': 'synthetic-guid', 'tty': '/dev/ttys999'}},
+                       'workspaces': {'Daily': {'host': 'synthetic-host', 'members': [],
+                                               'exact_layout': {'future': 'ignored by v0.7'}}},
+                       'groups': {'g': {'name': 'Studies'}}, 'config': {'timestamps': False}}
+            state.write_text(json.dumps(payload))
+            installer.install(home, source, configure_iterm=False)
+            self.assertEqual(json.loads(state.read_text()), payload)
+            self.assertIn('VERSION = "0.8.1"', (module / 'cx_version.py').read_text())
+            for filename in ('cx_inventory.py', 'cx_workspace_layout.py',
+                             'cx_workspace_restore.py'):
+                self.assertTrue((module / filename).is_file())
+            installer.uninstall(home)
+            self.assertEqual(json.loads(state.read_text()), payload)
+
     def test_idempotent_install_synchronizes_owned_module_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
@@ -33,6 +59,12 @@ class InstallerTests(unittest.TestCase):
             module = home / ".local/share/cxdeck"
             self.assertTrue((module / "cx_zmx.py").exists())
             self.assertTrue((module / "cx_upgrade.py").exists())
+            self.assertEqual((module / "cx_workspace_layout.py").read_bytes(),
+                             (source / "cx_workspace_layout.py").read_bytes())
+            self.assertEqual((module / "cx_workspace_restore.py").read_bytes(),
+                             (source / "cx_workspace_restore.py").read_bytes())
+            self.assertEqual((module / "cx_inventory.py").read_bytes(),
+                             (source / "cx_inventory.py").read_bytes())
             self.assertFalse((module / "obsolete.py").exists())
             self.assertFalse(old_module.exists())
             self.assertTrue((module / installer.INSTALL_MARKER).exists())

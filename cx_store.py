@@ -48,21 +48,27 @@ def thread_key(home, tid, host):
 class Store:
     def __init__(self, root=None):
         if root is None:
-            from cx_paths import PathUpgradeError, state_home, upgrade_state_path
-            try:
-                upgrade_state_path()
-            except PathUpgradeError as exc:
-                raise StateError(str(exc)) from exc
+            from cx_paths import state_home
             self.root = state_home() / 'workbench'
         else:
             self.root = Path(root)
         self.path = self.root / 'state.json'
 
-    def prepare(self):
-        # Refuse symlinked parents instead of chmod-ing or writing through them.
-        for p in (self.root, self.root.parent):
+    def _validate_path(self):
+        """Validate an existing Store path without mutating filesystem metadata."""
+        # The default layout has four user-controlled components below HOME
+        # (``.local/state/cxdeck/workbench``). Refuse a symlink at any of them;
+        # checking only the leaf would still permit writes through a symlinked
+        # ``.local`` or ``state`` directory.
+        for p in (self.root, *list(self.root.parents)[:3]):
             if p.is_symlink():
                 raise StateError(f"State path contains a symlink: {p}")
+        if self.root.exists() and (not self.root.is_dir() or self.root.stat().st_uid != os.getuid()):
+            raise StateError("State directory has another owner.")
+
+    def prepare(self):
+        # Refuse symlinked parents instead of chmod-ing or writing through them.
+        self._validate_path()
         self.root.mkdir(parents=True, mode=0o700, exist_ok=True)
         if self.root.stat().st_uid != os.getuid():
             raise StateError("State directory has another owner.")
@@ -87,7 +93,7 @@ class Store:
     def read(self):
         if not self.path.exists() and not self.path.is_symlink():
             return dict(version=1, agents={}, views={}, workspaces={}, groups={}, config={})
-        self.prepare()
+        self._validate_path()
         fd = os.open(self.path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
         try:
             info = os.fstat(fd)
@@ -175,6 +181,45 @@ class Store:
             if title in data['workspaces'] and not replace:
                 raise StateError("Workspace exists. Use --replace deliberately; nothing overwritten.")
             data['workspaces'][title] = copy.deepcopy(record)
+        self.change(edit)
+
+    def set_workspace_layout(self, title, layout, expected_workspace, expected_views,
+                             replace=False):
+        """Atomically add/replace an already validated exact presentation layout."""
+        from cx_workspace_layout import validate_layout
+        title = name(title, 80)
+        validated = validate_layout(layout)
+        expected_workspace = copy.deepcopy(expected_workspace)
+        expected_views = copy.deepcopy(expected_views)
+        def edit(data):
+            current = data['workspaces'].get(title)
+            if current is None:
+                raise StateError('Workspace disappeared before exact layout commit; nothing written.')
+            if current != expected_workspace:
+                raise StateError('Workspace changed during exact layout capture; nothing written.')
+            if data['views'] != expected_views:
+                raise StateError('Verified view metadata changed during exact layout capture; nothing written.')
+            if current.get('exact_layout') is not None and not replace:
+                raise StateError('Workspace already has an exact layout. Use --replace deliberately; nothing overwritten.')
+            updated = copy.deepcopy(current)
+            updated['exact_layout'] = validated
+            data['workspaces'][title] = updated
+        self.change(edit)
+
+    def set_view_receipts(self, receipts):
+        """Commit independently verified preferred-view receipts in one update."""
+        if not isinstance(receipts, dict):
+            raise StateError('Invalid preferred-view receipt batch.')
+        checked = {}
+        for key, receipt in receipts.items():
+            if (not isinstance(key, str) or not key or not isinstance(receipt, dict) or
+                    set(receipt) != {'guid', 'tty'} or
+                    not isinstance(receipt['guid'], str) or not receipt['guid'] or
+                    not isinstance(receipt['tty'], str) or not receipt['tty'].startswith('/dev/')):
+                raise StateError('Invalid preferred-view receipt batch.')
+            checked[key] = copy.deepcopy(receipt)
+        def edit(data):
+            data['views'].update(checked)
         self.change(edit)
 
     def resolve_group(self, token):

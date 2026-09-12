@@ -71,7 +71,7 @@ class AgentTests(unittest.TestCase):
         call = self.backend.create.call_args
         self.assertEqual(call.args[1], ["/test/bin/codex"])
         self.assertEqual(call.args[2], os.path.realpath("/home/test"))
-        self.assertEqual(call.args[3], {"cx_managed": "1", "cx_version": "0.7.0",
+        self.assertEqual(call.args[3], {"cx_managed": "1", "cx_version": "0.8.1",
             "cx_codex_home": "encoded-home", "cx_launch_policy": "safe", "cx_launch_mode": "new"})
         self.assertTrue(call.kwargs["detached"])
         self.assertEqual(call.kwargs["env"]["CX_MANAGED"], "1")
@@ -102,6 +102,7 @@ class AgentTests(unittest.TestCase):
         self.backend.snapshot.return_value = {'sessions': [row]}
         with patch.object(agent, '_prepare_current_view') as prepare:
             agent._attach_or_focus(row, 'Review', self.backend)
+        self.backend.snapshot.assert_called_once_with(bind_threads=False)
         prepare.assert_called_once_with('Review')
         self.backend.attach.assert_called_once_with(row)
 
@@ -114,7 +115,7 @@ class AgentTests(unittest.TestCase):
              patch('workbench.focus_rows') as focus, \
              patch.object(agent, '_prepare_current_view') as prepare:
             agent._attach_or_focus(row, 'Review', self.backend)
-        resolve.assert_called_once_with(row['session'], adapter)
+        resolve.assert_called_once_with(row['session'], adapter, bind_threads=False)
         focus.assert_called_once_with([target], adapter)
         self.backend.attach.assert_not_called()
         prepare.assert_not_called()
@@ -210,7 +211,7 @@ class AgentTests(unittest.TestCase):
                 patch.object(agent.sys, "platform", "linux"):
             agent.doctor()
         output = self.output.getvalue()
-        for expected in ("CX Deck 0.7.0", "Python ", "codex path:", "codex version:",
+        for expected in ("CX Deck 0.8.1", "Python ", "codex path:", "codex version:",
                          "zmx version: 0.8.1 (minimum 0.8.1: PASS)",
                          "zmx runtime/socket directory: /tmp/zmx",
                          "managed zmx sessions: 1", "YOLO=1 SAFE=0 UNKNOWN=0",

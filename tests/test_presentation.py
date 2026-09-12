@@ -160,17 +160,49 @@ class PresentationFlowTests(unittest.TestCase):
 
     def test_five_panes_receive_exact_full_names_without_cross_assignment(self):
         gui = FakeGUI(self.rows)
-        with patch.object(cx_iterm, 'client_map', side_effect=lambda backend: gui.clients):
+        with patch.object(cx_iterm, 'client_map', side_effect=lambda backend, *args: gui.clients):
             result = cx_iterm.show(self.rows, self.backend, self.store, gui=gui)
         self.assertEqual(result, dict(opened=5, reused=0))
         self.assertEqual(gui.open_calls, 1)
         self.assertEqual(gui.names, [item['display_name'] for item in self.rows])
         self.assertEqual(gui.configured, [True])
 
+    def test_view_reuse_uses_one_nonbinding_runtime_and_client_snapshot(self):
+        target = row(1, attached=1)
+        view = {'guid': 'guid-current', 'tty': '/dev/ttys1'}
+        gui = FakeGUI([target])
+        gui.views = [view]
+        class Backend:
+            def __init__(inner):
+                inner.process_calls = 0
+                inner.raw_calls = 0
+                inner.client_calls = 0
+                inner.snapshot_calls = 0
+            def processes(inner):
+                inner.process_calls += 1
+                return {999: {'stat': 'S'}}
+            def raw_snapshot(inner, **kwargs):
+                inner.raw_calls += 1
+                self.assertEqual(kwargs, {'bind_threads': False,
+                                          'process_table': {999: {'stat': 'S'}},
+                                          'include_diagnostics': False})
+                return {'context': CTX, 'sessions': [copy.deepcopy(target)]}
+            def client_tty_map(inner, rows, processes):
+                inner.client_calls += 1
+                return {target['sid']: {view['tty']}}
+            def snapshot(inner):
+                inner.snapshot_calls += 1
+                raise AssertionError('binding snapshot must not be used by presentation')
+        backend = Backend()
+        result = cx_iterm.show([target], backend, self.store, gui=gui)
+        self.assertEqual(result, {'opened': 0, 'reused': 1})
+        self.assertEqual((backend.process_calls, backend.raw_calls,
+                          backend.client_calls, backend.snapshot_calls), (1, 1, 1, 0))
+
     def test_disabled_timestamp_preference_is_used_by_view_rebuild(self):
         self.store.set_preference('timestamps', False)
         gui = FakeGUI(self.rows)
-        with patch.object(cx_iterm, 'client_map', side_effect=lambda backend: gui.clients):
+        with patch.object(cx_iterm, 'client_map', side_effect=lambda backend, *args: gui.clients):
             cx_iterm.show(self.rows, self.backend, self.store, gui=gui)
         self.assertEqual(gui.configured, [False])
 
@@ -188,7 +220,7 @@ class PresentationFlowTests(unittest.TestCase):
         gui = FakeGUI([fallback])
         snapshot = dict(context=CTX, sessions=[copy.deepcopy(fallback)])
         with patch.object(self.backend, 'snapshot', return_value=snapshot), \
-             patch.object(cx_iterm, 'client_map', side_effect=lambda backend: gui.clients):
+             patch.object(cx_iterm, 'client_map', side_effect=lambda backend, *args: gui.clients):
             cx_iterm.show([fallback], self.backend, self.store, gui=gui)
         self.assertEqual(gui.names, ['Task 9'])
 

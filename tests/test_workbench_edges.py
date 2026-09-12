@@ -1,5 +1,6 @@
 """Regression tests for UI command routing, native arguments and cold identity."""
 import contextlib
+import copy
 import io
 import os
 from pathlib import Path
@@ -58,24 +59,38 @@ class WorkbenchEdgeTests(unittest.TestCase):
 
     def test_views_rebuild_routes_to_presentation_only_command(self):
         c = Mock()
-        with patch.object(w, 'views_command', return_value=0) as rebuild:
+        with patch.object(entry, 'ResumeBackend', return_value=Mock()), \
+             patch.object(w, 'views_command', return_value=0) as rebuild:
             self.assertEqual(entry.main(['views', 'rebuild'], c), 0)
         self.assertEqual(rebuild.call_args.args[0], ['rebuild'])
         c.main.assert_not_called()
 
     def test_config_timestamps_routes_without_agent_operation(self):
         c = Mock()
-        with patch.object(w, 'config_command', return_value=0) as configure:
+        with patch.object(entry, 'ResumeBackend', return_value=Mock()), \
+             patch.object(w, 'config_command', return_value=0) as configure:
             self.assertEqual(entry.main(['config', 'timestamps', 'off'], c), 0)
         self.assertEqual(configure.call_args.args[0], ['timestamps', 'off'])
         c.main.assert_not_called()
 
     def test_views_rebuild_batches_only_verified_live_sessions(self):
+        # The T3 rebuild path consumes one canonical inventory and rechecks it.
         b = self.backend()
-        b.snapshot.return_value['sessions'][1]['state'] = 'NO_CODEX'
-        items = [dict(managed=item, title=item['display_name'])
-                 for item in b.snapshot.return_value['sessions']]
-        with patch.object(w, 'catalog', return_value=(items, [], [], False)), \
+        b.store = Store(Path(tempfile.mkdtemp()) / 'state')
+        records = []
+        for item in b.snapshot.return_value['sessions'][:2]:
+            records.append({'key': item['_key'], 'identity': None,
+                'conversation_state': 'LIVE_ONLY_UNBOUND', 'runtime_state': 'ALIVE',
+                'view_state': 'NO_VIEW', 'display': {'name': item['display_name']},
+                'runtime': {'managed': True, 'live_key': item['_key']},
+                'view': {'verified': False, 'guid': None, 'tty': None}, '_managed': item})
+        fresh = copy.deepcopy(records)
+        for index, value in enumerate(fresh):
+            value['view_state'] = 'VERIFIED_VIEW'
+            value['view'].update(verified=True, guid=f'g{index}', tty=f'/dev/t{index}')
+        snapshots = [dict(conversations=records), dict(conversations=fresh)]
+        with patch.object(w, '_read_history', return_value=([], False, None)), \
+                patch.object(w, 'inventory_snapshot', side_effect=snapshots), \
                 patch.object(w, 'focus_rows', return_value={'opened': 2, 'reused': 0}) as show, \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(w.views_command(['rebuild'], b), 0)
@@ -84,7 +99,8 @@ class WorkbenchEdgeTests(unittest.TestCase):
 
     def test_upgrade_routes_to_version_compatibility_module(self):
         c = Mock()
-        with patch('cx_upgrade.main', return_value=0) as run:
+        with patch.object(entry, 'ResumeBackend', return_value=Mock()), \
+             patch('cx_upgrade.main', return_value=0) as run:
             self.assertEqual(entry.main(['upgrade', 'status', '--json'], c), 0)
         self.assertEqual(run.call_args.args[0], ['status', '--json'])
         c.main.assert_not_called()

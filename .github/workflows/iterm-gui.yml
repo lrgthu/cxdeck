@@ -2,7 +2,7 @@ name: iTerm2 GUI acceptance (opt-in)
 on:
   workflow_dispatch:
   push:
-    branches: [release/v0.7-cxdeck]
+    branches: ['release/**']
 permissions:
   contents: read
 jobs:

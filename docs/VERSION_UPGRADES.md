@@ -21,9 +21,9 @@ The centralized semantic-version function returns:
   model, comes from a newer unsupported controller, or otherwise cannot be used
   safely.
 
-The v0.7 compatibility table has no regeneration boundary. A live session with
-`cx_version=0.6.0` is `UPGRADE_AVAILABLE`: it is fully usable and requires no
-restart. A v0.7-created session is `CURRENT`. `cx upgrade` is declarative: it
+The v0.8 compatibility table has no regeneration boundary. A live session with
+`cx_version=0.6.0` or `cx_version=0.7.0` is `UPGRADE_AVAILABLE`: it is fully
+usable and requires no restart. A v0.8-created session is `CURRENT`. `cx upgrade` is declarative: it
 reports current or compatible sessions, reports required future action, and
 fails closed for incompatible sessions. It does not attach, detach, kill,
 restart, rewrite a session label, or recreate a runtime generation.

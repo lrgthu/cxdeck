@@ -3,11 +3,32 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import cx_paths
+from cx_store import Store
 
 
 class StatePathUpgradeTests(unittest.TestCase):
+    def test_current_empty_home_is_not_mutated_by_upgrade_check(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            self.assertEqual(cx_paths.upgrade_state_path(home), 'CURRENT')
+            self.assertFalse(cx_paths.state_home(home).exists())
+
+    def test_store_read_never_runs_the_install_time_path_upgrade(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            old = home / cx_paths.LEGACY_STATE_RELATIVE / 'workbench'
+            old.mkdir(parents=True)
+            (old / 'state.json').write_text(json.dumps({
+                'version': 1, 'agents': {}, 'views': {}, 'workspaces': {},
+                'groups': {}, 'config': {}}))
+            with patch('pathlib.Path.home', return_value=home):
+                self.assertEqual(Store().read()['workspaces'], {})
+            self.assertTrue(old.exists())
+            self.assertFalse((cx_paths.state_home(home) / 'workbench').exists())
+
     def test_v060_workbench_moves_atomically_and_historical_files_stay_inert(self):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)

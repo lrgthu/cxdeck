@@ -46,7 +46,7 @@ jobs:
           zsh -n install.sh
           zsh -n uninstall.sh
           zsh -n tests/prepare_ci_iterm.zsh
-          python3 -m compileall -q agent_console.py console_entry.py codex_resume.py cx_paths.py cx_store.py cx_iterm.py cx_version.py cx_zmx.py cx_upgrade.py workbench.py install.py tests tools
+          python3 -m compileall -q .
       - name: Unit and disposable real-backend tests (no real Codex API calls)
         run: python3 -m unittest discover -s tests -v
       - name: Install and register iTerm2 scripting dictionary (macOS)
