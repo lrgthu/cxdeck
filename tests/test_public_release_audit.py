@@ -2,6 +2,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from tools import public_release_audit as audit
 
@@ -34,6 +35,15 @@ class PublicReleaseAuditTests(unittest.TestCase):
                             "11174064+project@users.noreply.github.com\n"
                             "00000000-0000-4000-8000-000000000001\n")
             self.assertEqual(audit.scan(root, [path]), [])
+
+    def test_scan_does_not_resolve_network_fqdn(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "fixture.txt"
+            path.write_text("ordinary public source\n")
+            with mock.patch.object(audit.socket, "getfqdn",
+                                   side_effect=AssertionError("network lookup")):
+                self.assertEqual(audit.scan(root, [path]), [])
 
 
 if __name__ == "__main__":

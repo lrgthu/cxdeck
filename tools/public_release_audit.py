@@ -51,7 +51,10 @@ EMAIL = re.compile(r"(?<![\w.+-])([\w.+-]+)@([A-Za-z0-9.-]+\.[A-Za-z]{2,})(?![\w
 def scan(root: Path, files, extra_forbidden=()):
     root = root.resolve()
     patterns = _patterns()
-    dynamic = {getpass.getuser(), socket.gethostname(), socket.getfqdn(), *extra_forbidden}
+    # FQDN resolution can block for a minute on otherwise healthy macOS runners.
+    # The kernel hostname plus an explicit environment override cover local
+    # identity without introducing a network lookup into this deterministic gate.
+    dynamic = {getpass.getuser(), socket.gethostname(), *extra_forbidden}
     dynamic = {value for value in dynamic if value and len(value) >= 4 and value not in {"root", "runner"}}
     findings = []
     for path in files:
