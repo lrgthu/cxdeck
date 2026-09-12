@@ -10,6 +10,9 @@ on:
         default: false
 permissions:
   contents: read
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     strategy:
@@ -27,7 +30,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update && sudo apt-get install -y zsh build-essential
-          curl -fL https://github.com/neurosnap/zmx/releases/download/v0.8.1/zmx-0.8.1-linux-x86_64.tar.gz -o /tmp/zmx.tar.gz
+          curl --proto '=https' --tlsv1.2 --fail --location --show-error \
+            https://github.com/neurosnap/zmx/releases/download/v0.8.1/zmx-0.8.1-linux-x86_64.tar.gz \
+            -o /tmp/zmx.tar.gz
           echo 'dfd75720b942466f28870731cc86dbc07afa72fb8f3bd5eeb4ff707e4eecebe8  /tmp/zmx.tar.gz' | sha256sum -c -
           tar -xzf /tmp/zmx.tar.gz -C /tmp
           sudo install -m 0755 /tmp/zmx /usr/local/bin/zmx
@@ -47,6 +52,8 @@ jobs:
           zsh -n uninstall.sh
           zsh -n tests/prepare_ci_iterm.zsh
           python3 -m compileall -q .
+      - name: Public-source privacy audit
+        run: python3 tools/public_release_audit.py
       - name: Unit and disposable real-backend tests (no real Codex API calls)
         run: python3 -m unittest discover -s tests -v
       - name: Install and register iTerm2 scripting dictionary (macOS)

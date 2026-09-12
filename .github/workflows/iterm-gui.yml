@@ -5,6 +5,9 @@ on:
     branches: ['release/**']
 permissions:
   contents: read
+concurrency:
+  group: iterm-gui-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   gui:
     runs-on: macos-latest

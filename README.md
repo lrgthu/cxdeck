@@ -51,7 +51,7 @@ cd cxdeck
 ./install.sh
 source "$HOME/.cxdeck.zsh"
 cx doctor
-cx upgrade status
+cx
 ```
 
 The installer checks prerequisites and installs CX Deck under
@@ -74,8 +74,16 @@ cx                         # start a persistent Codex session here
 cx "Model Evaluation"     # start or reuse an exact display name
 cx new --split             # new native iTerm2 split
 cx resume                  # select from saved and live conversations
-cx focus "Model Evaluation"
 cx status
+cx dashboard
+
+cx workspace save daily
+cx workspace capture daily # optional exact topology support
+cx workspace open daily
+
+cx views status
+cx find evaluation
+cx focus --next
 ```
 
 Closing the pane detaches the view. The Codex process remains in its zmx PTY.
@@ -132,14 +140,14 @@ Display names, pins, groups, workspace membership, and layout metadata live in
 their UUID or runtime generation. A workspace records a provider-neutral native
 layout plan and reconstructs verified views without nesting another terminal UI.
 `cx workspace capture NAME [--replace]` can add an optional exact native split
-tree after double-read verification. This read-only feature lazily requires the
-explicitly installed `iterm2==2.23` Python package; membership-only workspaces
-remain valid. Install that optional support into the same Python used by `cx`
-with `python3 -m pip install --user 'iterm2==2.23'`. Opening a captured workspace resolves every exact UUID and checks
-duplicates before moving verified iTerm Sessions into the saved tree. Frames and
-ratios are best-effort hints. Use `cx workspace open NAME --adaptive` to
-deliberately use the older adaptive layout; exact restore never falls back to it
-silently.
+tree after double-read verification. This feature lazily requires the explicitly
+installed `iterm2==2.23` Python package; ordinary CX Deck commands and
+membership-only workspaces do not. Install that optional support into the same
+Python used by `cx` with `python3 -m pip install --user 'iterm2==2.23'`.
+Opening a captured workspace resolves every exact UUID and checks duplicates
+before moving verified iTerm Sessions into the saved tree. Frames and ratios are
+best-effort hints. Use `cx workspace open NAME --adaptive` to deliberately use
+the older adaptive layout; exact restore never falls back to it silently.
 
 `cx status`, `cx resume --json`, and `cx views status --json` use the normalized
 `cxdeck.inventory/v1` model. Conversation, runtime, external-process, and view
@@ -199,7 +207,8 @@ Run `cx doctor` first. It reports Codex and zmx paths and versions, managed
 session counts, launch policies, unidentified external processes, iTerm2
 automation, and upgrade compatibility. GUI errors leave Codex and zmx running;
 use `cx status` to inspect runtime health and `cx views rebuild` to reconstruct
-missing views.
+missing views. Before posting diagnostics publicly, remove sensitive hostnames,
+paths, UUIDs, PIDs, and project names.
 
 ## Uninstall
 

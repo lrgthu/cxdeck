@@ -1,0 +1,23 @@
+name: Feature request
+description: Propose a focused improvement to daily CX Deck use
+title: "Feature: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: What repeated workflow or failure would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the user-visible result without assuming an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Identity, runtime, or presentation impact
+      description: Note any effect on conversation identity, zmx runtime, or iTerm views.

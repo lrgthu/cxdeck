@@ -1,0 +1,42 @@
+name: Bug report
+description: Report reproducible incorrect or unsafe behavior
+title: "Bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not paste tokens, credentials, private transcripts, or sensitive
+        terminal output. Use private vulnerability reporting for security issues.
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: CX Deck, macOS, iTerm2, Codex CLI, and zmx versions.
+      placeholder: "CX Deck 0.8.1; macOS …; iTerm2 …; Codex …; zmx …"
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command used
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Redacted cx doctor output
+      description: Remove sensitive paths, hostnames, UUIDs, PIDs, and project names.
+      render: text
