@@ -1,0 +1,37 @@
+name: iTerm2 GUI acceptance (opt-in)
+on:
+  workflow_dispatch:
+  push:
+    branches: [release/v0.7-cxdeck]
+permissions:
+  contents: read
+jobs:
+  gui:
+    runs-on: macos-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install and register terminal prerequisites
+        run: |
+          python3 -m pip install 'iterm2==2.23'
+          command -v zmx >/dev/null || brew install neurosnap/tap/zmx
+          brew list --cask iterm2 >/dev/null 2>&1 || brew install --cask iterm2
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/iTerm.app
+      - name: Verify official test app and prepare unattended first launch
+        run: zsh tests/prepare_ci_iterm.zsh
+      - name: Real graphical acceptance from an iTerm2 terminal (isolated dummy agents)
+        timeout-minutes: 4
+        env:
+          CX_E2E_VERIFY_PYTHON_API: '1'
+        run: python3 -u tests/run_ci_iterm_terminal.py
+      - name: Retain isolated-runner GUI failure screenshot
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cx-gui-diagnostics
+          path: ${{ runner.temp }}/cx-gui-diagnostics
+          if-no-files-found: warn
+          retention-days: 3
