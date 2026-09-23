@@ -71,7 +71,7 @@ class AgentTests(unittest.TestCase):
         call = self.backend.create.call_args
         self.assertEqual(call.args[1], ["/test/bin/codex"])
         self.assertEqual(call.args[2], os.path.realpath("/home/test"))
-        self.assertEqual(call.args[3], {"cx_managed": "1", "cx_version": "0.8.1",
+        self.assertEqual(call.args[3], {"cx_managed": "1", "cx_version": "0.8.2",
             "cx_codex_home": "encoded-home", "cx_launch_policy": "safe", "cx_launch_mode": "new"})
         self.assertTrue(call.kwargs["detached"])
         self.assertEqual(call.kwargs["env"]["CX_MANAGED"], "1")
@@ -187,6 +187,38 @@ class AgentTests(unittest.TestCase):
             agent.main(["resume", "--all"])
             run.assert_called_once_with(["resume", "--all"])
 
+    def test_bare_codex_flags_route_to_interactive_wrapper(self):
+        cases = (["--model", "foo"], ["-m", "foo"],
+                 ["--sandbox", "workspace-write"], ["-C", "/some/path"],
+                 ["--profile", "research"], ["--future-codex-option"])
+        for argv in cases:
+            with self.subTest(argv=argv), \
+                    patch("agent_console.run_codex", return_value=0) as run:
+                self.assertEqual(agent.main(argv), 0)
+                run.assert_called_once_with(list(argv))
+
+    def test_bare_yolo_launch_executes_codex_yolo_and_records_truthful_policy(self):
+        with patch('sys.stdin.isatty', return_value=True), \
+             patch('sys.stdout.isatty', return_value=True), \
+             patch.object(agent, '_prepare_current_view'):
+            self.assertEqual(agent.main(['--yolo']), 0)
+        call = self.backend.create.call_args
+        self.assertEqual(call.args[1], ['/test/bin/codex', '--yolo'])
+        self.assertEqual(call.args[3]['cx_launch_policy'], 'yolo')
+        self.assertEqual(call.args[3]['cx_launch_mode'], 'new')
+
+    def test_cx_owned_help_version_and_explicit_start_detach_keep_routing(self):
+        with patch('agent_console.run_codex') as run, \
+             patch('agent_console.start_agent') as start:
+            self.assertEqual(agent.main(['--help']), 0)
+            self.assertEqual(agent.main(['-h']), 0)
+            self.assertEqual(agent.main(['--version']), 0)
+            run.assert_not_called()
+            start.assert_not_called()
+        with patch('agent_console.start_agent') as start:
+            self.assertEqual(agent.main(['start', '--detach']), 0)
+            start.assert_called_once_with([], None, True)
+
     def test_project_annotation_updates_store_without_relaunch(self):
         row = session(task="one")
         self.backend.git.return_value = "/projects/real-repo\n"
@@ -211,7 +243,7 @@ class AgentTests(unittest.TestCase):
                 patch.object(agent.sys, "platform", "linux"):
             agent.doctor()
         output = self.output.getvalue()
-        for expected in ("CX Deck 0.8.1", "Python ", "codex path:", "codex version:",
+        for expected in ("CX Deck 0.8.2", "Python ", "codex path:", "codex version:",
                          "zmx version: 0.8.1 (minimum 0.8.1: PASS)",
                          "zmx runtime/socket directory: /tmp/zmx",
                          "managed zmx sessions: 1", "YOLO=1 SAFE=0 UNKNOWN=0",

@@ -49,8 +49,8 @@ class ITermObjectReferenceTests(unittest.TestCase):
         script = cx_iterm.APPLESCRIPT
         # Fresh objects returned by iTerm are read immediately, then converted to IDs.
         self.assertIn('set newWindow to (create window with profile cxProfile command paneCommand)', script)
-        self.assertIn('set childGuid to (unique id of childPane) as text', script)
-        self.assertIn('set childTTY to (tty of childPane) as text', script)
+        self.assertIn('set childGuid to (get unique id of childPane) as text', script)
+        self.assertIn('set childTTY to (get tty of childPane) as text', script)
         self.assertIn('set end of paneGuids to childGuid', script)
         self.assertIn('set variable childPane named "user.cxdeck_name" to paneName', script)
 

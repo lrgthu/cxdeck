@@ -15,8 +15,8 @@ multiplexer, a replacement for Codex, or an agent messaging system.
 - Closing a terminal pane does not kill Codex.
 - Exact Codex UUIDs prevent fuzzy or accidental resume.
 - Native iTerm2 windows, tabs, and splits stay the presentation layer.
-- Persistent pane badges keep long conversation names visible in narrow layouts.
-- Native iTerm2 timestamps show when scrollback lines were last modified.
+- Native iTerm2 session titles provide compact conversation labels.
+- Optional native iTerm2 timestamps show when scrollback lines were last modified.
 - Groups, pins, display names, workspaces, and layouts stay local and private.
 
 ## How it works
@@ -57,8 +57,8 @@ cx
 The installer checks prerequisites and installs CX Deck under
 `~/.local/share/cxdeck`. It does not install zmx, restart Codex, or modify a
 running zmx session. It creates only the `CX Deck` iTerm dynamic profile, which
-inherits the user's default profile and supplies CX Deck-scoped badges and
-timestamps.
+inherits the user's default profile and supplies the CX Deck-scoped timestamp
+preference.
 
 To update an existing checkout:
 
@@ -71,8 +71,10 @@ git pull --ff-only
 
 ```zsh
 cx                         # start a persistent Codex session here
+cx --yolo                  # start a persistent Codex session in YOLO mode
 cx "Model Evaluation"     # start or reuse an exact display name
 cx new --split             # new native iTerm2 split
+cx new --split -- --yolo   # explicit split with Codex launch flags
 cx resume                  # select from saved and live conversations
 cx status
 cx dashboard
@@ -92,6 +94,7 @@ Closing the pane detaches the view. The Codex process remains in its zmx PTY.
 ## Core commands
 
 ```text
+cx [CODEX_FLAGS...]
 cx new [--split|--tab|--window] [--count N]
 cx resume [--safe|--yolo] [--select EXACT_UUID ...] [--no-iterm]
 cx focus EXACT_NAME
@@ -159,19 +162,26 @@ presentation only and never resume a saved conversation.
 
 ## Native iTerm experience
 
-CX Deck-created views use a native iTerm2 session badge backed by the
-`user.cxdeck_name` session variable, with native session-name metadata as a
-supplement. `cx rename` updates verified current views without reconnecting
-Codex. At very narrow widths
-iTerm2 may visually truncate presentation, while the untruncated CX Deck name
-remains in the native session variable and session metadata.
+CX Deck supplies each view's native iTerm2 session title. `cx rename` updates
+verified current views without reconnecting Codex. To show compact labels for
+split panes, enable this user-owned iTerm2 preference:
 
-Native iTerm2 scrollback timestamps are enabled by default only in the CX Deck
-profile. Toggle CX Deck views with:
+```text
+iTerm2 Settings
+→ Appearance
+→ Panes
+→ Show per-pane title bar with split panes
+```
+
+CX Deck does not change that global preference and does not draw labels inside
+terminal output.
+
+Native iTerm2 scrollback timestamps are off by default. Enable them for CX Deck
+views with:
 
 ```zsh
-cx config timestamps off
 cx config timestamps on
+cx config timestamps off
 ```
 
 No timestamp text is inserted into Codex output. CX Deck does not configure

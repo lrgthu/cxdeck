@@ -115,7 +115,7 @@ def install(home, source, configure_iterm=None):
     payloads = {name: (source / name).read_bytes() for name in FILES}
     old_store = home / LEGACY_STATE_RELATIVE / 'workbench'
     active_store = old_store if old_store.exists() else state_home(home) / 'workbench'
-    timestamps = Store(active_store).preference('timestamps', True)
+    timestamps = Store(active_store).preference('timestamps', False)
     configure_iterm = sys.platform == 'darwin' if configure_iterm is None else configure_iterm
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     backups = state_home(home) / 'backups'

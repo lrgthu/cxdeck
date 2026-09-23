@@ -32,7 +32,7 @@ class InstallerTests(unittest.TestCase):
             state.write_text(json.dumps(payload))
             installer.install(home, source, configure_iterm=False)
             self.assertEqual(json.loads(state.read_text()), payload)
-            self.assertIn('VERSION = "0.8.1"', (module / 'cx_version.py').read_text())
+            self.assertIn('VERSION = "0.8.2"', (module / 'cx_version.py').read_text())
             for filename in ('cx_inventory.py', 'cx_workspace_layout.py',
                              'cx_workspace_restore.py'):
                 self.assertTrue((module / filename).is_file())
@@ -72,6 +72,25 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual((home / '.local/state/cxdeck/workbench/state.json').read_text(),
                              '{"version":1,"agents":{"a":{"name":"Study"}},"views":{},"workspaces":{},"groups":{}}\n')
             self.assertTrue(cx_iterm._profile_path(home).exists())
+
+    def test_installer_converges_profile_without_badge_and_preserves_timestamp_preference(self):
+        source = Path(__file__).resolve().parents[1]
+        for stored, expected in ((None, False), (True, True), (False, False)):
+            with self.subTest(stored=stored), tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary)
+                (home / '.zshrc').write_text('# personal\n')
+                if stored is not None:
+                    state = home / '.local/state/cxdeck/workbench/state.json'
+                    state.parent.mkdir(parents=True)
+                    state.write_text(json.dumps({'version': 1, 'agents': {}, 'views': {},
+                        'workspaces': {}, 'groups': {}, 'config': {'timestamps': stored}}))
+                installer.install(home, source, configure_iterm=True)
+                profile = json.loads(cx_iterm._profile_path(home).read_text())['Profiles'][0]
+                self.assertNotIn('Badge Text', profile)
+                self.assertIs(profile['Timestamps Visible'], expected)
+                if stored is None:
+                    state = home / '.local/state/cxdeck/workbench/state.json'
+                    self.assertFalse(state.exists())
 
     def test_preserves_zshrc_symlink(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -219,6 +238,19 @@ class InstallerTests(unittest.TestCase):
             result = subprocess.run(['zsh', '-f', '-c', script], env=env,
                                     text=True, capture_output=True, check=True)
             self.assertEqual(result.stdout.splitlines(), ['direct:bypass', 'direct:managed'])
+
+    def test_shell_wrapper_preserves_bare_cx_flag_order(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            python = root / 'python3'
+            python.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            python.chmod(0o755)
+            wrapper = shlex.quote(str(Path(__file__).resolve().parents[1] / 'cxdeck.zsh'))
+            env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'])
+            result = subprocess.run(
+                ['zsh', '-f', '-c', f'source {wrapper}; cx --yolo --model foo'],
+                env=env, text=True, capture_output=True, check=True)
+            self.assertEqual(result.stdout.splitlines()[1:], ['--yolo', '--model', 'foo'])
 
 
 if __name__ == "__main__":

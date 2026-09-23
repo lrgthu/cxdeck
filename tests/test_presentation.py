@@ -66,11 +66,13 @@ class FakeGUI:
 
 
 class PresentationProfileTests(unittest.TestCase):
-    def test_profile_is_scoped_and_uses_native_badge_and_timestamps(self):
+    def test_profile_is_scoped_without_badge_and_defaults_timestamps_off(self):
+        default = cx_iterm.profile_payload()['Profiles'][0]
         enabled = cx_iterm.profile_payload(True)['Profiles'][0]
         disabled = cx_iterm.profile_payload(False)['Profiles'][0]
         self.assertEqual(enabled['Name'], 'CX Deck')
-        self.assertEqual(enabled['Badge Text'], r'\(user.cxdeck_name)')
+        self.assertNotIn('Badge Text', enabled)
+        self.assertIs(default['Timestamps Visible'], False)
         self.assertIs(enabled['Timestamps Visible'], True)
         self.assertEqual(enabled['Timestamps Style'], 1)
         self.assertIs(disabled['Timestamps Visible'], False)
@@ -165,7 +167,7 @@ class PresentationFlowTests(unittest.TestCase):
         self.assertEqual(result, dict(opened=5, reused=0))
         self.assertEqual(gui.open_calls, 1)
         self.assertEqual(gui.names, [item['display_name'] for item in self.rows])
-        self.assertEqual(gui.configured, [True])
+        self.assertEqual(gui.configured, [False])
 
     def test_view_reuse_uses_one_nonbinding_runtime_and_client_snapshot(self):
         target = row(1, attached=1)
@@ -206,12 +208,19 @@ class PresentationFlowTests(unittest.TestCase):
             cx_iterm.show(self.rows, self.backend, self.store, gui=gui)
         self.assertEqual(gui.configured, [False])
 
+    def test_enabled_timestamp_preference_is_used_by_view_rebuild(self):
+        self.store.set_preference('timestamps', True)
+        gui = FakeGUI(self.rows)
+        with patch.object(cx_iterm, 'client_map', side_effect=lambda backend, *args: gui.clients):
+            cx_iterm.show(self.rows, self.backend, self.store, gui=gui)
+        self.assertEqual(gui.configured, [True])
+
     def test_full_name_is_independent_of_terminal_width(self):
         full = 'Visual Computation Convergence Across Narrow Panes'
         profile = cx_iterm.profile_payload(True)['Profiles'][0]
+        self.assertNotIn('Badge Text', profile)
         for columns in (160, 100, 80, 60):
             with self.subTest(columns=columns):
-                self.assertEqual(profile['Badge Text'], r'\(user.cxdeck_name)')
                 self.assertEqual(validate_name(full), full)
 
     def test_codex_title_is_used_when_no_custom_name_exists(self):
