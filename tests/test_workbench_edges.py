@@ -31,8 +31,14 @@ class WorkbenchEdgeTests(unittest.TestCase):
     def test_unnamed_gui_launch_forwards_flags_after_separator(self):
         b = self.backend()
         with patch.object(ui, 'ITerm'), patch.object(w, 'focus_rows'):
-            w.new_agents(['--split', '--', '--profile', 'research', '--model', 'literal'], b)
-        b.console.start_agent.assert_called_once_with(['--profile', 'research', '--model', 'literal'], None, detached=True)
+            w.new_agents(['--split', '--', '--yolo'], b)
+        b.console.start_agent.assert_called_once_with(['--yolo'], None, detached=True)
+
+    def test_named_gui_launch_forwards_yolo_after_separator(self):
+        b = self.backend()
+        with patch.object(ui, 'ITerm'), patch.object(w, 'focus_rows'):
+            w.new_agents(['--split', 'My Agent', '--', '--yolo'], b)
+        b.console.start_agent.assert_called_once_with(['--yolo'], 'My Agent', detached=True)
 
     def test_batch_launch_creates_arbitrary_count_from_same_directory(self):
         b = self.backend()

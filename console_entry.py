@@ -42,7 +42,7 @@ HELP = f'''CX Deck {VERSION} — persistent Codex sessions with a native termina
   cx views status            read-only runtime/presentation health
   cx views rebuild [--workspace NAME]  create missing verified views only
   cx views refresh           refresh names on verified existing iTerm views
-  cx config timestamps on|off  native iTerm scrollback timestamps (default on)
+  cx config timestamps on|off  native iTerm scrollback timestamps (default off)
   cx upgrade status          runtime compatibility for the installed cx version
   cx upgrade                 apply defined safe upgrades; never restart implicitly
 

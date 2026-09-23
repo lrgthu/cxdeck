@@ -90,7 +90,7 @@ class ZmxTests(unittest.TestCase):
         self.assertEqual(argv[:3], ["/bin/zmx", "attach", "--labels"])
         self.assertEqual(argv[-4:], ["cx-chat-test", "/bin/codex", "resume", ID])
         labels = zmx.parse_labels(argv[3])
-        self.assertEqual(labels["cx_version"], "0.8.1")
+        self.assertEqual(labels["cx_version"], "0.8.2")
         self.assertEqual(labels["cx_zmx_version"], "0.8.1")
         self.assertEqual(zmx.decode_path(labels["cx_launch_cwd"]), os.path.realpath(cwd))
         self.assertEqual(run.call_args.kwargs["env"]["ZMX_NO_DETACH_KEY"], "1")

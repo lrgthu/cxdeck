@@ -173,7 +173,7 @@ def _prepare_current_view(display_name):
     import cx_iterm
     try:
         cx_iterm.prepare_current_view(
-            display_name, Store().preference('timestamps', True))
+            display_name, Store().preference('timestamps', False))
     except (RuntimeError, OSError) as exc:
         print('cx: presentation warning: ' + str(exc) +
               '. The Codex process and zmx generation are unchanged.', file=sys.stderr)
@@ -380,6 +380,7 @@ def doctor():
 
 HELP = f"""CX Deck {VERSION}: persistent Codex sessions with a native terminal experience
   codex / cx / cx new        new persistent Codex session here
+  cx --yolo / cx --model M   forward Codex flags into a managed new session
   cx LABEL                   create or attach a named session
   cx new --split|--tab|--window  open native iTerm2 views
   cx resume                  saved/live picker; cold resume defaults to YOLO
@@ -407,6 +408,8 @@ def main(argv=None):
     if not argv:
         start_agent([])
         return 0
+    if argv[0].startswith('-'):
+        return run_codex(argv)
     command, rest = argv[0], argv[1:]
     if command in ("resume", "fork"):
         return run_codex([command, *rest])

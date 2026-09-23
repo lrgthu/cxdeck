@@ -10,17 +10,19 @@ CX Deck owns one iTerm
 settings from the user's current default profile. The file overrides only:
 
 ```text
-Badge Text = \(user.cxdeck_name)
 Timestamps Visible = true|false
 Timestamps Style = overlap
 ```
 
 Views are created explicitly with that profile, so unrelated iTerm sessions and
-the Default Profile are unchanged. The badge is iTerm's native overlay and does
-not consume terminal rows. CX Deck also sets native session-name metadata, while
-the attached program remains free to update its ordinary terminal title. The
-badge and session-name metadata use the complete Store display name; iTerm may
-visually shorten them when physical space is insufficient.
+the Default Profile are unchanged. CX Deck sets the native iTerm session name,
+while the attached program remains free to update its ordinary terminal title.
+The compatibility variable `user.cxdeck_name` also carries the complete Store
+display name, but the dynamic profile does not render it as a badge.
+
+For compact labels, users may enable iTerm2 Settings → Appearance → Panes →
+Show per-pane title bar with split panes. That is a global, user-owned iTerm2
+preference; CX Deck never changes it. No title is drawn inside terminal output.
 
 For `cx` and `cx new` in the caller's current pane, CX Deck selects its profile
 and sets the same user variable with iTerm's documented OSC controls immediately
@@ -38,13 +40,16 @@ to all verified existing views. Neither operation writes to the PTY, sends input
 attaches, detaches, or changes the zmx generation.
 
 iTerm's `Timestamps Visible` session-profile property supplies per-line scrollback
-times. `cx config timestamps on|off` updates only the CX Deck dynamic profile;
-iTerm applies that profile update to existing views that use it as well as future
-views. No prefix is inserted into terminal output, no scrollback database is
-created, and no agent is reattached.
+times. It defaults off when no preference is stored. `cx config timestamps
+on|off` updates only the CX Deck dynamic profile and preserves an explicit
+stored choice. A disposable iTerm2 3.7.0 probe confirmed that an already-open
+session using a dynamic profile dropped a removed badge property within 0.5
+seconds of the profile update. Existing CX Deck views therefore converge without
+closing panes; future views use the same updated profile. No prefix is inserted
+into terminal output, no scrollback database is created, and no agent is
+reattached.
 
-These mechanisms follow iTerm2's supported
-[badge](https://iterm2.com/documentation-badges.html) and
+These mechanisms follow iTerm2's supported session-title and
 [session timestamp](https://iterm2.com/documentation-preferences-profiles-session.html)
 features. CX Deck uses AppleScript only for supported session creation,
 GUID/TTY inventory, focus, title, and user-variable operations; it does not use
@@ -87,6 +92,7 @@ links, terminal close, reattach, and child-exit cleanup. Common direct and zmx
 behavior is equivalent; closing the zmx client preserves the child.
 
 The disposable real-iTerm harness verifies native window, tab, and split
-creation, unique badges/titles across five panes, narrow-pane resize, timestamps,
+creation, unique native session titles across five panes, no badge override,
+narrow-pane resize, timestamps,
 inventory, focus, preferred-view reuse, pane disappearance, workspace reopen,
 process preservation, and detach-key disabling.

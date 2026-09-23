@@ -200,8 +200,8 @@ APPLESCRIPT = r'''on run argv
                         set rows of childPane to 56
                     end try
                 end if
-                set childGuid to (unique id of childPane) as text
-                set childTTY to (tty of childPane) as text
+                set childGuid to (get unique id of childPane) as text
+                set childTTY to (get tty of childPane) as text
                 set paneGuids to {childGuid}
             else if bestGuid is "" then
                 set targetWindow to missing value
@@ -218,8 +218,8 @@ APPLESCRIPT = r'''on run argv
                     set nextTab to (create tab with profile cxProfile command paneCommand)
                     set childPane to current session of nextTab
                 end tell
-                set childGuid to (unique id of childPane) as text
-                set childTTY to (tty of childPane) as text
+                set childGuid to (get unique id of childPane) as text
+                set childTTY to (get tty of childPane) as text
                 set paneGuids to {childGuid}
             else
                 set splitPane to missing value
@@ -249,11 +249,11 @@ APPLESCRIPT = r'''on run argv
                         set childPane to (split horizontally with profile cxProfile command paneCommand)
                     end if
                 end tell
-                set childGuid to (unique id of childPane) as text
-                set childTTY to (tty of childPane) as text
+                set childGuid to (get unique id of childPane) as text
+                set childTTY to (get tty of childPane) as text
                 set end of paneGuids to childGuid
             end if
-            if (profile name of childPane) is not cxProfile then error "iTerm2 did not create the pane with the CX Deck profile"
+            if (get profile name of childPane) is not cxProfile then error "iTerm2 did not create the pane with the CX Deck profile"
             set name of childPane to paneName
             set variable childPane named "user.cxdeck_name" to paneName
             set output to output & childGuid & (ASCII character 9) & childTTY & linefeed
@@ -308,7 +308,7 @@ def parse_views(text):
     return views
 
 
-def profile_payload(timestamps=True):
+def profile_payload(timestamps=False):
     """Return the minimal iTerm dynamic profile owned by CX Deck.
 
     iTerm merges omitted keys from the current default profile. These overrides
@@ -318,7 +318,6 @@ def profile_payload(timestamps=True):
         'Profiles': [{
             'Name': PROFILE_NAME,
             'Guid': PROFILE_GUID,
-            'Badge Text': r'\(user.cxdeck_name)',
             'Timestamps Visible': bool(timestamps),
             'Timestamps Style': 1,
         }]
@@ -339,7 +338,7 @@ def _validate_profile_parents(path):
                 raise StateError(f'iTerm2 profile path is not an owned directory: {parent}')
 
 
-def ensure_profile(timestamps=True, home=None):
+def ensure_profile(timestamps=False, home=None):
     """Install/update only CX Deck's dynamic iTerm profile, atomically."""
     path = _profile_path(home)
     _validate_profile_parents(path)
@@ -416,7 +415,7 @@ def remove_profile(home=None):
     return True
 
 
-def prepare_current_view(display_name, timestamps=True, stream=None, environ=None,
+def prepare_current_view(display_name, timestamps=False, stream=None, environ=None,
                          platform=None, home=None):
     """Apply the CX Deck profile to the current iTerm session before attach.
 
@@ -439,7 +438,7 @@ def prepare_current_view(display_name, timestamps=True, stream=None, environ=Non
 
 
 class ITerm:
-    def configure(self, timestamps=True):
+    def configure(self, timestamps=False):
         return ensure_profile(timestamps)
 
     def call(self, *args):
@@ -543,7 +542,7 @@ def show(rows, b, store, gui=None, mode='window', anchor=None,
     anchor = caller_tty() if anchor is None else anchor
     configure = getattr(gui, 'configure', None)
     if configure:
-        configure(store.preference('timestamps', True))
+        configure(store.preference('timestamps', False))
     gui.preflight(mode, anchor)
     with store.lock('views'):
         data, procs = _presentation_snapshot(b)
@@ -603,7 +602,7 @@ def refresh(rows, b, store, gui=None):
     gui = gui or ITerm()
     configure = getattr(gui, 'configure', None)
     if configure:
-        configure(store.preference('timestamps', True))
+        configure(store.preference('timestamps', False))
     gui.preflight()
     data, procs = _presentation_snapshot(b)
     current = {r['_key']: r for r in data['sessions']}

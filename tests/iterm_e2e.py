@@ -137,8 +137,6 @@ def verify_profile_api(views, timestamps, api_environment):
             if session is None:
                 raise RuntimeError('Disposable iTerm session disappeared before profile verification')
             properties = (await session.async_get_profile()).all_properties
-            if properties.get('Badge Text') != r'\(user.cxdeck_name)':
-                raise RuntimeError('Live iTerm session did not retain the CX Deck badge profile property')
             if ('Timestamps Visible' not in properties or
                     bool(properties['Timestamps Visible']) != timestamps):
                 observed = {key: value for key, value in properties.items()
@@ -160,12 +158,14 @@ def main():
     api_environment = {'HOME': str(Path.home()), **{
         key: value for key, value in os.environ.items() if key.startswith('ITERM')}}
     profile_path = cx_iterm._profile_path()
-    timestamps = True
+    timestamps = False
     if profile_path.exists():
         profile = json.loads(profile_path.read_text())['Profiles'][0]
         if profile.get('Guid') != cx_iterm.PROFILE_GUID:
             raise RuntimeError('Existing CX Deck profile is not owned by this installation')
-        timestamps = bool(profile.get('Timestamps Visible', True))
+        if 'Badge Text' in profile:
+            raise RuntimeError('CX Deck dynamic profile still contains a badge override')
+        timestamps = bool(profile.get('Timestamps Visible', False))
     gui.configure(timestamps)
     gui.preflight()
     runtime = "/tmp/cxgi-" + uuid.uuid4().hex[:10]
@@ -225,7 +225,7 @@ def main():
                     presentation = gui.inspect(view)
                     if any((presentation['badge_name'] != item['display_name'],
                             presentation['session_name'] != item['display_name'])):
-                        raise RuntimeError('Incorrect iTerm title/badge/profile assignment: ' + repr(presentation))
+                        raise RuntimeError('Incorrect iTerm session-title metadata assignment: ' + repr(presentation))
                 profile_api_verified = verify_profile_api(
                     list(store.read()['views'].values()), timestamps, api_environment)
                 long_view = store.read()['views'][refreshed[0]['_key']]
@@ -280,8 +280,8 @@ def main():
                 print(json.dumps({"result": "PASS", "agents": 5, "zmx_version": "0.8.1",
                     "timestamps_enabled": timestamps,
                     "profile_api_verified": profile_api_verified,
-                    "real_gui": True, "checks": ["native windows/splits/tabs", "five unique badges/titles",
-                    "160/100/80/60-column name metadata", "native timestamp profile", "verified view reuse",
+                    "real_gui": True, "checks": ["native windows/splits/tabs", "five unique native session titles",
+                    "no CX Deck badge override", "160/100/80/60-column name metadata", "native timestamp profile", "verified view reuse",
                     "one preferred view", "direct attach focuses preferred view", "rename and workspace reopen", "close pane keeps PID",
                     "recreate missing view", "ZMX_NO_DETACH_KEY=1"]}))
             finally:

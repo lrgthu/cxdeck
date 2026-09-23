@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.2
+
+- Replaced the large CX Deck iTerm badge with compact native session-title
+  presentation.
+- Made CX Deck scrollback timestamps opt-in by default while preserving explicit
+  stored preferences.
+- Added natural forwarding of bare Codex CLI flags, so `cx --yolo` and similar
+  interactive launches work directly.
+- Preserved conversation identity, zmx runtime generations, workspace behavior,
+  and resume semantics.
+
 ## 0.8.1
 
 - Added exact native iTerm workspace capture and ordered split-tree restoration;

@@ -386,7 +386,7 @@ def new_agents(argv, b):
     mode = 'tab' if a.tab else 'window' if a.window else 'split'
     anchor = cx_iterm.caller_tty()
     gui = cx_iterm.ITerm()
-    gui.configure(b.store.preference('timestamps', True))
+    gui.configure(b.store.preference('timestamps', False))
     gui.preflight(mode, anchor)
     created = []
     try:
@@ -410,7 +410,7 @@ def launch_selected(chosen, history, args, b):
     opts = layout(args)
     gui = cx_iterm.ITerm()
     if not args.no_iterm:
-        gui.configure(b.store.preference('timestamps', True))
+        gui.configure(b.store.preference('timestamps', False))
         gui.preflight()
     with r.launch_lock(r.codex_home()):
         fresh, unknown, _, failed = catalog(b, history)
@@ -466,7 +466,7 @@ def config_command(argv, b):
     parser.add_argument('value', nargs='?', choices=('on', 'off'))
     args = parser.parse_args(argv)
     if args.value is None:
-        enabled = b.store.preference('timestamps', True)
+        enabled = b.store.preference('timestamps', False)
         print('timestamps: ' + ('on' if enabled else 'off'))
         return 0
     enabled = args.value == 'on'
@@ -852,7 +852,7 @@ def workspace_open_exact(title, record, args, b):
     try:
         final_observation = observe()
         restore.revalidate_runtimes(landed.items, final_observation)
-        cx_iterm.ensure_profile(b.store.preference('timestamps', True))
+        cx_iterm.ensure_profile(b.store.preference('timestamps', False))
         result = restore.restore_live(
             landed.layout, landed.items, observe, final_observation['context'],
             cx_iterm.caller_tty())
